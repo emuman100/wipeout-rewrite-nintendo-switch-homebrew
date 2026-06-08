@@ -1,0 +1,612 @@
+/*
+ * platform_switch.c
+ * Nintendo Switch platform backend for wipeout-rewrite
+ *
+ * Implements the same platform API as platform_sdl.c / platform_sokol.c,
+ * but targets the Nintendo Switch via devkitA64 + libnx + EGL/OpenGL ES 2.
+ *
+ * Build requirements:
+ *   devkitPro devkitA64 r19+
+ *   libnx 4.x
+ *   switch-mesa / switch-libdrm (for EGL + OpenGL ES 2)
+ *   switch-sdl2  (optional – see AUDIO section; audren path used by default)
+ *   deko3d is NOT used; we rely on OpenGL ES 2 via EGL (mesa-switch)
+ *
+ * The wipeout-rewrite CMake flag to pair with this file:
+ *   -DPLATFORM=SWITCH -DRENDERER=GLES2
+ *
+ * Controller mapping (Joy-Con / Pro Controller):
+ *   Accelerate      → A  (HidNpadButton_A)
+ *   Fire weapon     → X  (HidNpadButton_X)
+ *   Change view     → Y  (HidNpadButton_Y)
+ *   Left airbrake   → L  (HidNpadButton_L)
+ *   Right airbrake  → R  (HidNpadButton_R)
+ *   ZR / ZL         → unbound by default (remap in-game: Options → Controls)
+ *   Navigate Up     → Up or Left-stick up
+ *   Navigate Down   → Down or Left-stick down
+ *   Navigate Left   → Left or Left-stick left
+ *   Navigate Right  → Right or Left-stick right
+ *   Confirm         → A
+ *   Back            → B or X
+ *   Pause           → + (Plus)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <malloc.h>  /* memalign */
+
+/* Debug tracing — define as printf for nxlink debugging, no-op for release */
+#ifndef TRACE
+#  define TRACE(fmt, ...) ((void)0)
+#endif
+
+/* devkitPro / libnx */
+#include <switch.h>
+
+/* EGL + GLES2 via mesa-switch */
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+
+/* wipeout-rewrite internal headers (paths relative to project src/) */
+#include "platform.h"
+#include "input.h"
+#include "system.h"
+#include "mem.h"
+
+/* -------------------------------------------------------------------------
+ * Internal state
+ * ---------------------------------------------------------------------- */
+
+static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
+static EGLContext s_egl_context = EGL_NO_CONTEXT;
+static EGLSurface s_egl_surface = EGL_NO_SURFACE;
+
+static NWindow *s_nwindow = NULL;
+
+static bool s_wants_exit = false;
+
+/* Audio */
+static AudioOutBuffer s_audio_buffers[2];
+static u8 *s_audio_data[2];
+static u32 s_audio_buffer_size = 0;
+static u32 s_audio_sample_rate = 0;    /* cached at audio_init() */
+static u32 s_audio_channel_count = 0;  /* cached at audio_init() */
+static void (*s_audio_mix_cb)(float *buffer, uint32_t len) = NULL;
+
+/* Controller – initialised once in main(), updated each frame */
+static PadState s_pad;
+
+/* Screen dimensions – Switch native resolution */
+#define SWITCH_SCREEN_W 1280
+#define SWITCH_SCREEN_H 720
+
+/* Audio parameters */
+#define AUDIO_SAMPLE_RATE   44100
+#define AUDIO_CHANNELS      2
+#define AUDIO_SAMPLES_PER_FRAME  (AUDIO_SAMPLE_RATE / 30)   /* ~1470 samples @ 30 fps */
+#define AUDIO_BUFFER_FRAMES 2
+
+/* -------------------------------------------------------------------------
+ * EGL / OpenGL ES 2 initialisation
+ * ---------------------------------------------------------------------- */
+
+static bool egl_init(void) {
+    /* Grab the default NWindow (framebuffer window) */
+    s_nwindow = nwindowGetDefault();
+    if (!s_nwindow) {
+        TRACE("platform_switch: nwindowGetDefault() failed");
+        return false;
+    }
+
+    nwindowSetDimensions(s_nwindow, SWITCH_SCREEN_W, SWITCH_SCREEN_H);
+
+    s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (s_egl_display == EGL_NO_DISPLAY) {
+        TRACE("platform_switch: eglGetDisplay failed");
+        return false;
+    }
+
+    EGLint major, minor;
+    if (!eglInitialize(s_egl_display, &major, &minor)) {
+        TRACE("platform_switch: eglInitialize failed");
+        return false;
+    }
+
+    /* Request OpenGL ES 2 */
+    eglBindAPI(EGL_OPENGL_ES_API);
+
+    static const EGLint config_attribs[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
+        EGL_RED_SIZE,        8,
+        EGL_GREEN_SIZE,      8,
+        EGL_BLUE_SIZE,       8,
+        EGL_ALPHA_SIZE,      8,
+        EGL_DEPTH_SIZE,      24,
+        EGL_NONE
+    };
+
+    EGLConfig config;
+    EGLint num_configs;
+    if (!eglChooseConfig(s_egl_display, config_attribs, &config, 1, &num_configs) || num_configs == 0) {
+        TRACE("platform_switch: eglChooseConfig failed");
+        return false;
+    }
+
+    s_egl_surface = eglCreateWindowSurface(s_egl_display, config,
+                                           (EGLNativeWindowType)s_nwindow, NULL);
+    if (s_egl_surface == EGL_NO_SURFACE) {
+        TRACE("platform_switch: eglCreateWindowSurface failed (0x%x)", eglGetError());
+        return false;
+    }
+
+    static const EGLint ctx_attribs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_NONE
+    };
+    s_egl_context = eglCreateContext(s_egl_display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (s_egl_context == EGL_NO_CONTEXT) {
+        TRACE("platform_switch: eglCreateContext failed");
+        return false;
+    }
+
+    if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
+        TRACE("platform_switch: eglMakeCurrent failed");
+        return false;
+    }
+
+    /* Disable vsync so the game can manage its own timing */
+    eglSwapInterval(s_egl_display, 0);
+
+    return true;
+}
+
+static void egl_cleanup(void) {
+    if (s_egl_display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (s_egl_context != EGL_NO_CONTEXT)
+            eglDestroyContext(s_egl_display, s_egl_context);
+        if (s_egl_surface != EGL_NO_SURFACE)
+            eglDestroySurface(s_egl_display, s_egl_surface);
+        eglTerminate(s_egl_display);
+    }
+    s_egl_display = EGL_NO_DISPLAY;
+    s_egl_context = EGL_NO_CONTEXT;
+    s_egl_surface = EGL_NO_SURFACE;
+}
+
+/* -------------------------------------------------------------------------
+ * Audio (libnx AudioOut)
+ *
+ * The Switch AudioOut API is callback-less; we push audio each frame from
+ * platform_end_frame().  We allocate two DMA-aligned buffers and alternate.
+ * ---------------------------------------------------------------------- */
+
+static bool audio_init(void) {
+    Result rc = audoutInitialize();
+    if (R_FAILED(rc)) {
+        TRACE("platform_switch: audoutInitialize failed: 0x%x", rc);
+        return false;
+    }
+
+    /* Cache these – they are constant for the lifetime of the app */
+    s_audio_sample_rate   = audoutGetSampleRate();    /* 48000 Hz */
+    s_audio_channel_count = audoutGetChannelCount();  /* 2 (stereo) */
+
+    /*
+     * Each buffer holds one frame worth of audio at the HW rate.
+     * Size must be aligned to 0x1000 for DMA.
+     */
+    s_audio_buffer_size = (s_audio_sample_rate / 30) * s_audio_channel_count * sizeof(s16);
+    s_audio_buffer_size = (s_audio_buffer_size + 0xFFF) & ~0xFFF;
+
+    for (int i = 0; i < AUDIO_BUFFER_FRAMES; i++) {
+        s_audio_data[i] = (u8 *)memalign(0x1000, s_audio_buffer_size);
+        if (!s_audio_data[i]) {
+            TRACE("platform_switch: audio buffer alloc failed at index %d", i);
+            /* Free any buffers already allocated before returning */
+            for (int j = 0; j < i; j++) {
+                free(s_audio_data[j]);
+                s_audio_data[j] = NULL;
+            }
+            audoutExit();
+            return false;
+        }
+        memset(s_audio_data[i], 0, s_audio_buffer_size);
+
+        s_audio_buffers[i].next        = NULL;
+        s_audio_buffers[i].buffer      = s_audio_data[i];
+        s_audio_buffers[i].buffer_size = s_audio_buffer_size;
+        s_audio_buffers[i].data_size   = s_audio_buffer_size;
+        s_audio_buffers[i].data_offset = 0;
+    }
+
+    rc = audoutStartAudioOut();
+    if (R_FAILED(rc)) {
+        TRACE("platform_switch: audoutStartAudioOut failed: 0x%x", rc);
+        for (int i = 0; i < AUDIO_BUFFER_FRAMES; i++) {
+            free(s_audio_data[i]);
+            s_audio_data[i] = NULL;
+        }
+        audoutExit();
+        return false;
+    }
+
+    /* Pre-queue BOTH buffers so the hardware always has one ready */
+    audoutAppendAudioOutBuffer(&s_audio_buffers[0]);
+    audoutAppendAudioOutBuffer(&s_audio_buffers[1]);
+
+    return true;
+}
+
+static void audio_cleanup(void) {
+    audoutStopAudioOut();
+    audoutExit();
+    for (int i = 0; i < AUDIO_BUFFER_FRAMES; i++) {
+        if (s_audio_data[i]) {
+            free(s_audio_data[i]);
+            s_audio_data[i] = NULL;
+        }
+    }
+}
+
+/*
+ * Called once per frame (from platform_end_frame).
+ * Waits for a released buffer, fills it via the game's mix callback,
+ * then re-queues it.
+ */
+static void audio_update(void) {
+    if (!s_audio_mix_cb) return;
+
+    AudioOutBuffer *released = NULL;
+    u32 released_count = 0;
+
+    /*
+     * Block until the hardware finishes playing a buffer.
+     * audoutWaitPlayFinish is used instead of audoutGetReleasedAudioOutBuffer
+     * to avoid silent audio gaps when a frame runs longer than ~33ms.
+     * This matches the pattern in the switchbrew audio/echo example.
+     */
+    Result rc = audoutWaitPlayFinish(&released, &released_count, UINT64_MAX);
+    if (R_FAILED(rc) || released_count == 0) return;
+
+    /* Use cached HW parameters (constant after audio_init) */
+    u32 hw_num_samples = s_audio_buffer_size / (s_audio_channel_count * sizeof(s16));
+
+    /*
+     * We ask the game engine for 44100 Hz float stereo, then convert/resample
+     * to the HW rate (48000 Hz) s16le.
+     */
+    u32 src_samples = (u32)((double)hw_num_samples * 44100.0 / s_audio_sample_rate) + 2;
+    float *float_buf = (float *)malloc(src_samples * s_audio_channel_count * sizeof(float));
+    if (!float_buf) return;
+
+    memset(float_buf, 0, src_samples * s_audio_channel_count * sizeof(float));
+    s_audio_mix_cb(float_buf, src_samples);
+
+    /* Convert float PCM → s16 with simple linear resampling */
+    s16 *out = (s16 *)released->buffer;
+    for (u32 i = 0; i < hw_num_samples; i++) {
+        double src_pos = (double)i * 44100.0 / s_audio_sample_rate;
+        u32 src_i = (u32)src_pos;
+        float frac = (float)(src_pos - src_i);
+        if (src_i + 1 >= src_samples) src_i = src_samples - 2;
+
+        for (u32 ch = 0; ch < s_audio_channel_count; ch++) {
+            float s0 = float_buf[src_i * s_audio_channel_count + ch];
+            float s1 = float_buf[(src_i + 1) * s_audio_channel_count + ch];
+            float s  = s0 + (s1 - s0) * frac;
+            if      (s >  1.0f) s =  1.0f;
+            else if (s < -1.0f) s = -1.0f;
+            out[i * s_audio_channel_count + ch] = (s16)(s * 32767.0f);
+        }
+    }
+
+    free(float_buf);
+
+    released->data_size = hw_num_samples * s_audio_channel_count * sizeof(s16);
+    audoutAppendAudioOutBuffer(released);
+}
+
+/* -------------------------------------------------------------------------
+ * Input
+ *
+ * Maps libnx HidNpadButton values to wipeout-rewrite INPUT_* constants.
+ * s_pad is initialised once in main() via padInitializeDefault().
+ * input_clear() resets per-frame edge states (pressed/released) before
+ * re-polling, matching the pattern used by platform_sdl.c.
+ * ---------------------------------------------------------------------- */
+
+static void input_update(void) {
+    /*
+     * Note: input_clear() is NOT called here. It is called by system_update()
+     * after game_update(), so that pressed/released states are visible to game
+     * logic for the full frame — matching the DC port's system_update() pattern.
+     */
+    padUpdate(&s_pad);
+
+    u64 held    = padGetButtons(&s_pad);
+    u64 pressed = padGetButtonsDown(&s_pad);
+    u64 released_buttons = padGetButtonsUp(&s_pad);
+    HidAnalogStickState ls = padGetStickPos(&s_pad, 0);
+
+    /* ---- Digital buttons — passed as float 0.0/1.0 per input_set_button_state contract ---- */
+
+    /* Accelerate */
+    input_set_button_state(INPUT_GAMEPAD_A,       (held & HidNpadButton_A)     ? 1.0f : 0.0f);
+    /* Brake */
+    input_set_button_state(INPUT_GAMEPAD_B,       (held & HidNpadButton_B)     ? 1.0f : 0.0f);
+    /* Fire / Use weapon — ZR is right trigger */
+    input_set_button_state(INPUT_GAMEPAD_R_TRIGGER,  (held & HidNpadButton_ZR)    ? 1.0f : 0.0f);
+    /* Absorb — ZL is left trigger */
+    input_set_button_state(INPUT_GAMEPAD_L_TRIGGER,  (held & HidNpadButton_ZL)    ? 1.0f : 0.0f);
+    /* Left airbrake — L is left shoulder */
+    input_set_button_state(INPUT_GAMEPAD_L_SHOULDER, (held & HidNpadButton_L)     ? 1.0f : 0.0f);
+    /* Right airbrake — R is right shoulder */
+    input_set_button_state(INPUT_GAMEPAD_R_SHOULDER, (held & HidNpadButton_R)     ? 1.0f : 0.0f);
+
+    /* D-pad */
+    input_set_button_state(INPUT_GAMEPAD_DPAD_UP,    (held & HidNpadButton_Up)    ? 1.0f : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_DPAD_DOWN,  (held & HidNpadButton_Down)  ? 1.0f : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_DPAD_LEFT,  (held & HidNpadButton_Left)  ? 1.0f : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_DPAD_RIGHT, (held & HidNpadButton_Right) ? 1.0f : 0.0f);
+
+    /* Menu navigation */
+    input_set_button_state(INPUT_GAMEPAD_START,   (held & HidNpadButton_Plus)  ? 1.0f : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_SELECT,  (held & HidNpadButton_Minus) ? 1.0f : 0.0f);
+
+    /* X / Y */
+    input_set_button_state(INPUT_GAMEPAD_X,       (held & HidNpadButton_X)     ? 1.0f : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_Y,       (held & HidNpadButton_Y)     ? 1.0f : 0.0f);
+
+    /* ---- Analog stick → axis values ---- */
+
+    /* Left stick X → steering (range -1..1) */
+    float axis_x = (float)ls.x / 32767.0f;
+    float axis_y = (float)ls.y / 32767.0f;
+
+    input_set_button_state(INPUT_GAMEPAD_L_STICK_LEFT,  axis_x < 0 ? -axis_x : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_L_STICK_RIGHT, axis_x > 0 ?  axis_x : 0.0f);
+    /*
+     * libnx Y axis: positive = stick physically UP.
+     * SDL/game convention: positive = stick DOWN (screen-space Y).
+     * Negate so L_STICK_UP fires when the stick is pushed up.
+     */
+    input_set_button_state(INPUT_GAMEPAD_L_STICK_UP,    axis_y > 0 ?  axis_y : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_L_STICK_DOWN,  axis_y < 0 ? -axis_y : 0.0f);
+
+    /* Exit when Home is held for 5 seconds – or just Plus in menus via the game */
+    (void)pressed;
+    (void)released_buttons;
+}
+
+/* -------------------------------------------------------------------------
+ * Public platform API (matches platform.h contract)
+ * ---------------------------------------------------------------------- */
+
+void platform_exit(void) {
+    s_wants_exit = true;
+}
+
+vec2i_t platform_screen_size(void) {
+    return (vec2i_t){ SWITCH_SCREEN_W, SWITCH_SCREEN_H };
+}
+
+double platform_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+bool platform_get_fullscreen(void) {
+    /* Switch is always full-screen; this option is a no-op */
+    return true;
+}
+
+void platform_set_fullscreen(bool fullscreen) {
+    (void)fullscreen;
+    /* Nothing to do; the Switch has no windowed mode */
+}
+
+void platform_set_audio_mix_cb(void (*cb)(float *buffer, uint32_t len)) {
+    s_audio_mix_cb = cb;
+}
+
+/* ---- Video ---- */
+
+void platform_video_init(void) {
+    /* EGL is already up by the time the game calls this */
+}
+
+void platform_video_cleanup(void) {
+    egl_cleanup();
+}
+
+void platform_prepare_frame(void) {
+    /* Nothing special needed before rendering a frame on Switch */
+}
+
+void platform_end_frame(void) {
+    /* Present the rendered frame */
+    eglSwapBuffers(s_egl_display, s_egl_surface);
+
+    /* Push audio for this frame */
+    audio_update();
+}
+
+/* ---- File I/O ---- */
+
+/*
+ * All file I/O uses sdmc:/ (the SD card), which is always available to
+ * homebrew via libnx without any extra mounting.
+ *
+ * Assets (read-only):  sdmc:/wipeout/<name>
+ *   Copy the 517 game data files from the PSX disc into this directory.
+ *
+ * User data (read/write):  sdmc:/switch/wipegame/userdata/<name>
+ *   Saves and config.  The directory is created automatically on first launch.
+ *   No title ID or save-data partition required.
+ */
+
+#include <sys/stat.h>   /* mkdir */
+
+/* SD card paths */
+#define ASSETS_PATH   "sdmc:/wipeout"
+#define USERDATA_PATH "sdmc:/switch/wipegame/userdata"
+
+/* Ensure the userdata directory exists; called once from main() */
+static void userdata_dir_init(void) {
+    /* mkdir silently succeeds if the directory already exists */
+    mkdir("sdmc:/switch/wipegame", 0777);
+    mkdir(USERDATA_PATH, 0777);
+}
+
+FILE *platform_open_asset(const char *name, const char *mode) {
+    char path[512];
+    snprintf(path, sizeof(path), ASSETS_PATH "/%s", name);
+    return fopen(path, mode);
+}
+
+uint8_t *platform_load_asset(const char *name, uint32_t *out_size) {
+    FILE *f = platform_open_asset(name, "rb");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size <= 0) { fclose(f); return NULL; }
+
+    /*
+     * Use mem_temp_alloc, not malloc. All callers in the upstream codebase
+     * (image.c, track.c, object.c, sfx.c) call mem_temp_free() on the returned
+     * pointer — matching the SDL platform's file_load() which also uses
+     * mem_temp_alloc. Using malloc() here causes memory corruption on free.
+     */
+    uint8_t *data = (uint8_t *)mem_temp_alloc((uint32_t)size);
+    if (!data) { fclose(f); return NULL; }
+
+    if (out_size) *out_size = (uint32_t)fread(data, 1, size, f);
+    fclose(f);
+    return data;
+}
+
+uint8_t *platform_load_userdata(const char *name, uint32_t *out_size) {
+    char path[512];
+    snprintf(path, sizeof(path), USERDATA_PATH "/%s", name);
+
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size <= 0) { fclose(f); return NULL; }
+
+    /* game.c calls mem_temp_free() on the returned buffer — must match */
+    uint8_t *data = (uint8_t *)mem_temp_alloc((uint32_t)size);
+    if (!data) { fclose(f); return NULL; }
+
+    if (out_size) *out_size = (uint32_t)fread(data, 1, size, f);
+    fclose(f);
+    return data;
+}
+
+uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
+    char path[512];
+    snprintf(path, sizeof(path), USERDATA_PATH "/%s", name);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+
+    bool ok = ((int32_t)fwrite(data, 1, size, f) == size);
+    fclose(f);
+    /* sdmc:/ writes are committed immediately – no extra flush needed */
+    return ok ? (uint32_t)size : 0;
+}
+
+/* ---- Input pump (called each frame by the main loop) ---- */
+
+void platform_pump_events(void) {
+    /* Check if the user requested exit via appletMainLoop */
+    if (!appletMainLoop()) {
+        s_wants_exit = true;
+        return;
+    }
+    /* Feed the input system */
+    input_update();
+}
+
+/* -------------------------------------------------------------------------
+ * main()
+ *
+ * On Nintendo Switch, main() must be provided by the application.
+ * It mirrors the pattern used by platform_sdl.c (the SDL_main-style loop).
+ * ---------------------------------------------------------------------- */
+
+int main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+
+    /*
+     * Lock the exit so that if the user presses the Home button mid-game
+     * the OS waits for our cleanup before force-terminating (up to 15 s).
+     * This protects in-flight save writes and ensures audio/EGL teardown
+     * completes cleanly before hbmenu regains control.
+     * appletUnlockExit() is called after all cleanup below.
+     */
+    appletLockExit();
+
+    /* ---- libnx services ---- */
+
+    /* Create sdmc:/switch/wipegame/userdata/ if it doesn't exist yet */
+    userdata_dir_init();
+
+    /* ---- EGL + GLES2 ---- */
+    if (!egl_init()) {
+        TRACE("platform_switch: EGL init failed – aborting");
+        appletUnlockExit();
+        return 1;
+    }
+
+    /* ---- Audio ---- */
+    if (!audio_init()) {
+        TRACE("platform_switch: audio init failed – continuing without audio");
+    }
+
+    /* ---- Controller ---- */
+    /* Enable all controller styles; initialise the pad state once here */
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&s_pad);
+
+    /* ---- Game init ---- */
+    system_init();
+
+    /* ---- Main loop — mirrors DC port exactly ---- */
+    while (!s_wants_exit) {
+        platform_pump_events();
+        if (s_wants_exit) break;   /* appletMainLoop() signalled exit; don't run another frame */
+        platform_prepare_frame();
+        system_update();   /* owns timing, render_frame_prepare/end, game_update, input_clear */
+        platform_end_frame();
+    }
+
+    /* ---- Cleanup ---- */
+    /* system_cleanup() calls render_cleanup() and input_cleanup(). */
+    system_cleanup();
+    platform_video_cleanup();
+    audio_cleanup();
+
+    /*
+     * Release the exit lock. If the OS requested exit (Home button) while
+     * the lock was held, the process is terminated here after cleanup
+     * completes. If we exited normally (in-game quit), this is a no-op
+     * and main() returns 0, handing control back to hbmenu.
+     */
+    appletUnlockExit();
+
+    return 0;
+}

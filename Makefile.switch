@@ -1,0 +1,138 @@
+#---------------------------------------------------------------------------------
+# Makefile for wipeout-rewrite Nintendo Switch port
+#
+# Targets:
+#   make          – build wipegame.nro
+#   make clean    – remove build artefacts
+#
+# Prerequisites:
+#   devkitPro devkitA64 toolchain  (https://devkitpro.org/wiki/Getting_Started)
+#   dkp-pacman packages:
+#     switch-dev switch-mesa switch-libdrm switch-libglapi
+#
+# Usage:
+#   export DEVKITPRO=/opt/devkitpro   # or wherever you installed it
+#   make -f Makefile.switch
+#
+#---------------------------------------------------------------------------------
+
+ifeq ($(strip $(DEVKITPRO)),)
+  $(error "DEVKITPRO is not set in your environment.  Run: export DEVKITPRO=/opt/devkitpro")
+endif
+
+include $(DEVKITPRO)/libnx/switch_rules
+
+#---------------------------------------------------------------------------------
+# Target name (no extension; elf/nro appended automatically)
+#---------------------------------------------------------------------------------
+TARGET   := wipegame
+BUILD    := build-switch
+SOURCES  := src src/wipeout
+INCLUDES := src src/wipeout
+
+#---------------------------------------------------------------------------------
+# Options for code generation
+#---------------------------------------------------------------------------------
+ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+
+CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections \
+            $(ARCH) $(INCLUDE) -D__SWITCH__ -DPLATFORM_SWITCH=1 \
+            -DRENDERER_GLES2=1 \
+            -DUSE_GLES2=1 \
+            -std=gnu11
+
+CFLAGS   += $(shell pkg-config --cflags libdrm 2>/dev/null)
+
+LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) \
+            -Wl,-Map,$(BUILD)/$(TARGET).map \
+            -Wl,--gc-sections
+
+#---------------------------------------------------------------------------------
+# Libraries
+# Order matters: GLES2 → EGL → glapi → drm_nouveau → nx → m
+#---------------------------------------------------------------------------------
+LIBS     := -lGLESv2 -lEGL -lglapi -ldrm_nouveau -lnx -lm
+
+LIBDIRS  := $(PORTLIBS) $(LIBNX)
+
+#---------------------------------------------------------------------------------
+# Source files
+#---------------------------------------------------------------------------------
+CFILES := \
+    src/platform_switch.c         \
+    src/wipeout/race.c            \
+    src/wipeout/camera.c          \
+    src/wipeout/object.c          \
+    src/wipeout/droid.c           \
+    src/wipeout/ui.c              \
+    src/wipeout/hud.c             \
+    src/wipeout/image.c           \
+    src/wipeout/game.c            \
+    src/wipeout/menu.c            \
+    src/wipeout/main_menu.c       \
+    src/wipeout/ingame_menus.c    \
+    src/wipeout/title.c           \
+    src/wipeout/intro.c           \
+    src/wipeout/scene.c           \
+    src/wipeout/ship.c            \
+    src/wipeout/ship_ai.c         \
+    src/wipeout/ship_player.c     \
+    src/wipeout/track.c           \
+    src/wipeout/weapon.c          \
+    src/wipeout/particle.c        \
+    src/wipeout/sfx.c             \
+    src/utils.c                   \
+    src/types.c                   \
+    src/system.c                  \
+    src/mem.c                     \
+    src/input.c                   \
+    src/render/render_gl.c
+
+OFILES   := $(addprefix $(BUILD)/, $(CFILES:.c=.o))
+DFILES   := $(OFILES:.o=.d)
+
+INCLUDE  := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
+            $(foreach dir,$(LIBDIRS),-I$(dir)/include)
+
+LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+
+#---------------------------------------------------------------------------------
+# NRO metadata
+#---------------------------------------------------------------------------------
+APP_TITLE   := wipEout Rewrite
+APP_AUTHOR  := phoboslab / Switch port
+APP_VERSION := 1.0.0
+ICON        := switch/icon.jpg
+
+#---------------------------------------------------------------------------------
+# Rules
+#---------------------------------------------------------------------------------
+.PHONY: all clean
+
+all: $(BUILD) $(BUILD)/$(TARGET).nro
+
+$(BUILD):
+	mkdir -p $@
+
+$(BUILD)/$(TARGET).elf: $(OFILES)
+	@echo "Linking $@"
+	$(CC) $(LDFLAGS) $^ $(LIBPATHS) $(LIBS) -o $@
+
+$(BUILD)/$(TARGET).nacp:
+	@nacptool --create "$(APP_TITLE)" "$(APP_AUTHOR)" "$(APP_VERSION)" $@
+
+$(BUILD)/$(TARGET).nro: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).nacp
+	@echo "Building NRO..."
+	$(eval ICON_FLAG  := $(if $(wildcard $(ICON)),--icon=$(ICON),))
+	elf2nro $< $@ --nacp=$(BUILD)/$(TARGET).nacp $(ICON_FLAG)
+	@echo "Done: $@"
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "CC $<"
+	$(CC) $(CFLAGS) -MMD -MP -MF $(BUILD)/$*.d -c $< -o $@
+
+-include $(DFILES)
+
+clean:
+	rm -rf $(BUILD)

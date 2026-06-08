@@ -1,0 +1,190 @@
+# CMakeLists.txt – Nintendo Switch port of wipeout-rewrite
+#
+# Usage (from the wipeout-rewrite repo root, with devkitPro in PATH):
+#
+#   export DEVKITPRO=/opt/devkitpro
+#   export DEVKITARM=$DEVKITPRO/devkitARM
+#   export DEVKITA64=$DEVKITPRO/devkitA64
+#
+#   cmake -S . -B build-switch \
+#         -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake \
+#         -DPLATFORM=SWITCH \
+#         -DRENDERER=GLES2
+#   cmake --build build-switch
+#
+# Output: build-switch/wipegame.nro  (and .elf)
+#
+# Prerequisites (install via dkp-pacman):
+#   switch-dev  switch-mesa  switch-libdrm  switch-libglapi
+#   switch-glad (optional but handy)  deko3d (not used here)
+#
+cmake_minimum_required(VERSION 3.16)
+
+# ---- Detect Switch cross-build -----------------------------------------------
+if(DEFINED ENV{DEVKITPRO})
+    list(APPEND CMAKE_MODULE_PATH "$ENV{DEVKITPRO}/cmake")
+endif()
+
+# The Switch.cmake toolchain from devkitPro sets these for us:
+#   CMAKE_SYSTEM_NAME = Generic
+#   CMAKE_C_COMPILER  = aarch64-none-elf-gcc
+#   etc.
+# We just need to add the Switch-specific flags below.
+
+project(wipeout C)
+
+# ---- Source files (mirrors the upstream Makefile COMMON_SRC) -----------------
+set(COMMON_SRC
+    src/wipeout/race.c
+    src/wipeout/camera.c
+    src/wipeout/object.c
+    src/wipeout/droid.c
+    src/wipeout/ui.c
+    src/wipeout/hud.c
+    src/wipeout/image.c
+    src/wipeout/game.c
+    src/wipeout/menu.c
+    src/wipeout/main_menu.c
+    src/wipeout/ingame_menus.c
+    src/wipeout/title.c
+    src/wipeout/intro.c
+    src/wipeout/scene.c
+    src/wipeout/ship.c
+    src/wipeout/ship_ai.c
+    src/wipeout/ship_player.c
+    src/wipeout/track.c
+    src/wipeout/weapon.c
+    src/wipeout/particle.c
+    src/wipeout/sfx.c
+    src/utils.c
+    src/types.c
+    src/system.c
+    src/mem.c
+    src/input.c
+    src/render/render_gl.c    # GLES2 renderer (upstream renderer_gles2.c path)
+)
+
+# ---- Platform backend --------------------------------------------------------
+if(PLATFORM STREQUAL "SWITCH")
+    list(APPEND COMMON_SRC src/platform_switch.c)
+    set(SWITCH_PLATFORM ON)
+elseif(PLATFORM STREQUAL "SDL2")
+    list(APPEND COMMON_SRC src/platform_sdl.c)
+elseif(PLATFORM STREQUAL "SOKOL")
+    list(APPEND COMMON_SRC src/platform_sokol.c)
+else()
+    # Default to SDL2 for non-Switch builds
+    list(APPEND COMMON_SRC src/platform_sdl.c)
+endif()
+
+# ---- Executable target -------------------------------------------------------
+add_executable(wipegame ${COMMON_SRC})
+
+target_include_directories(wipegame PRIVATE
+    src
+    src/wipeout
+)
+
+# ---- Compile definitions -----------------------------------------------------
+target_compile_definitions(wipegame PRIVATE
+    RENDERER_GLES2=1   # use the GLES2 render path
+    USE_GLES2=1        # enable GLES2 shader precision qualifiers in render_gl.c
+)
+
+if(SWITCH_PLATFORM)
+    target_compile_definitions(wipegame PRIVATE
+        __SWITCH__=1
+        PLATFORM_SWITCH=1
+        # Asset path is sdmc:/wipeout; userdata path is sdmc:/switch/wipegame/userdata
+    )
+endif()
+
+# ---- Compiler flags ----------------------------------------------------------
+target_compile_options(wipegame PRIVATE
+    -O2
+    -Wall
+    -Wno-unused-function
+    -ffunction-sections
+    -fdata-sections
+    # GCC extensions used throughout the codebase
+    -std=gnu11
+)
+
+# ---- Linker flags ------------------------------------------------------------
+target_link_options(wipegame PRIVATE
+    -specs=${DEVKITPRO}/libnx/switch.specs
+    -Wl,--gc-sections
+)
+
+# ---- Switch libraries --------------------------------------------------------
+if(SWITCH_PLATFORM)
+    # devkitPro supplies find-modules for libnx, EGL, etc.
+    find_library(LIBNX nx REQUIRED)
+    find_library(LIBDRM_NOUVEAU drm_nouveau REQUIRED)
+    find_library(LIBGLAPI glapi REQUIRED)
+    find_library(LIBMESA_EGL EGL REQUIRED)
+    find_library(LIBGLESV2 GLESv2 REQUIRED)
+
+    target_link_libraries(wipegame PRIVATE
+        ${LIBGLESV2}
+        ${LIBMESA_EGL}
+        ${LIBGLAPI}
+        ${LIBDRM_NOUVEAU}
+        ${LIBNX}
+        m
+    )
+
+    # ---- NRO generation (Switch homebrew format) ----------------------------
+    #
+    # After building the ELF, devkitPro's elf2nro tool wraps it into an NRO.
+    # We call it as a post-build custom command.
+    #
+    # control.nacp holds the title name, author, version shown in the hbmenu.
+    # It is generated from nacp_info.json (see switch/ folder) or can be
+    # created manually with nacptool.
+    #
+    find_program(ELF2NRO  elf2nro  HINTS $ENV{DEVKITPRO}/tools/bin REQUIRED)
+    find_program(NACPTOOL nacptool HINTS $ENV{DEVKITPRO}/tools/bin)
+
+    set(NACP_FILE    ${CMAKE_BINARY_DIR}/wipegame.nacp)
+    set(NRO_FILE     ${CMAKE_BINARY_DIR}/wipegame.nro)
+    set(ICON_FILE    ${CMAKE_SOURCE_DIR}/switch/icon.jpg)
+
+    # Generate NACP
+    if(NACPTOOL)
+        add_custom_command(TARGET wipegame POST_BUILD
+            COMMAND ${NACPTOOL}
+                --create
+                "wipEout Rewrite"
+                "phoboslab / Switch port"
+                "1.0.0"
+                ${NACP_FILE}
+            COMMENT "Generating NACP..."
+        )
+    endif()
+
+    # Generate NRO (with icon and NACP if they exist)
+    set(NRO_EXTRA_ARGS "")
+    if(EXISTS ${ICON_FILE})
+        list(APPEND NRO_EXTRA_ARGS "--icon=${ICON_FILE}")
+    endif()
+    if(NACPTOOL AND EXISTS ${NACP_FILE})
+        list(APPEND NRO_EXTRA_ARGS "--nacp=${NACP_FILE}")
+    endif()
+
+    add_custom_command(TARGET wipegame POST_BUILD
+        COMMAND ${ELF2NRO}
+            $<TARGET_FILE:wipegame>
+            ${NRO_FILE}
+            ${NRO_EXTRA_ARGS}
+        COMMENT "Building NRO: ${NRO_FILE}"
+    )
+
+    message(STATUS "Switch NRO will be written to: ${NRO_FILE}")
+
+else()
+    # Non-Switch: link SDL2 / GLEW as usual
+    find_package(SDL2 REQUIRED)
+    find_package(GLEW REQUIRED)
+    target_link_libraries(wipegame PRIVATE SDL2::SDL2 GLEW::GLEW GL m)
+endif()
