@@ -92,10 +92,20 @@ target_include_directories(wipegame PRIVATE
     src
     src/wipeout
     src/libs
-    src/GL
     # devkitPro switch-mesa EGL/GLES2 headers
     $ENV{DEVKITPRO}/portlibs/switch/include
 )
+
+# Force src/ onto the compiler's -I path so that #include <GL/glew.h>
+# and #include <GLES2/gl2.h> etc. find our stubs and switch-mesa headers.
+# target_include_directories uses -I internally but angle-bracket resolution
+# needs the paths explicitly present as -I flags on the command line.
+if(SWITCH_PLATFORM)
+    target_compile_options(wipegame PRIVATE
+        -I${CMAKE_SOURCE_DIR}/src
+        -I$ENV{DEVKITPRO}/portlibs/switch/include
+    )
+endif()
 
 # ---- Compile definitions -----------------------------------------------------
 target_compile_definitions(wipegame PRIVATE
