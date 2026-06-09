@@ -15,7 +15,7 @@
 # Output: build-switch/wipegame.nro  (and .elf)
 #
 # Prerequisites (install via dkp-pacman):
-#   switch-dev  switch-mesa  switch-libdrm  switch-libglapi
+#   switch-dev  switch-mesa  switch-libdrm_nouveau
 #   switch-glad (optional but handy)  deko3d (not used here)
 #
 cmake_minimum_required(VERSION 3.16)

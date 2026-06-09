@@ -8,7 +8,7 @@
 # Prerequisites:
 #   devkitPro devkitA64 toolchain  (https://devkitpro.org/wiki/Getting_Started)
 #   dkp-pacman packages:
-#     switch-dev switch-mesa switch-libdrm switch-libglapi
+#     switch-dev switch-mesa switch-libdrm_nouveau
 #
 # Usage:
 #   export DEVKITPRO=/opt/devkitpro   # or wherever you installed it

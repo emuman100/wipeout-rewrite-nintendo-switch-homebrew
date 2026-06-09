@@ -14,7 +14,7 @@ A Nintendo Switch NRO port of [phoboslab/wipeout-rewrite](https://github.com/pho
 - The following devkitPro packages:
 
 ```bash
-dkp-pacman -S switch-dev switch-mesa switch-libdrm switch-libglapi
+dkp-pacman -S switch-dev switch-mesa switch-libdrm_nouveau
 ```
 
 - CMake ≥ 3.13, or GNU make
