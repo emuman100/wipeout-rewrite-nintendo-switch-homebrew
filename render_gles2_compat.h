@@ -18,9 +18,29 @@
 #include <EGL/eglext.h>
 
 /* Stub out glew — render_gl.c calls glewInit() and sets glewExperimental
- * on the non-Apple unix path. We no-op them here so the code compiles. */
-static unsigned int glewExperimental;
+ * on the non-Apple unix path. We no-op them here so the code compiles.
+ * __attribute__((unused)) suppresses the "defined but not used" warning
+ * in every translation unit that doesn't reference glewExperimental. */
+static unsigned int glewExperimental __attribute__((unused));
 static inline unsigned int glewInit(void) { return 0; }
+
+/* VAOs — render_gl.c calls glGenVertexArrays/glBindVertexArray unconditionally.
+ * GLES2 core doesn't have them, but switch-mesa exposes them via the
+ * GL_OES_vertex_array_object extension. Map the core names to the OES names. */
+#ifdef GL_OES_vertex_array_object
+#  define glGenVertexArrays   glGenVertexArraysOES
+#  define glBindVertexArray   glBindVertexArrayOES
+#  define glDeleteVertexArrays glDeleteVertexArraysOES
+#else
+/* Fallback no-op stubs if the extension isn't declared yet */
+static inline void glGenVertexArrays(int n, unsigned int *arrays) {
+    (void)n; if (arrays) *arrays = 1;
+}
+static inline void glBindVertexArray(unsigned int array) { (void)array; }
+static inline void glDeleteVertexArrays(int n, const unsigned int *arrays) {
+    (void)n; (void)arrays;
+}
+#endif
 
 /* GLvoid is used in render_gl.c macros but not defined by GLES2 */
 #ifndef GLvoid
