@@ -33,6 +33,14 @@ endif()
 
 project(wipeout C)
 
+# ---- Renderer selection ------------------------------------------------------
+# For Switch the renderer is always GLES2. The RENDERER variable is accepted
+# for consistency with the upstream build system but only GLES2 is supported.
+if(DEFINED RENDERER AND NOT RENDERER STREQUAL "GLES2")
+    message(WARNING "Only RENDERER=GLES2 is supported for Switch. Ignoring RENDERER=${RENDERER}.")
+endif()
+set(RENDERER "GLES2" CACHE STRING "Renderer backend (Switch only supports GLES2)" FORCE)
+
 # ---- Source files (mirrors the upstream Makefile COMMON_SRC) -----------------
 set(COMMON_SRC
     src/wipeout/race.c
