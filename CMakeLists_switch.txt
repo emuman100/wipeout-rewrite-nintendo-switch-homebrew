@@ -61,7 +61,7 @@ set(COMMON_SRC
     src/system.c
     src/mem.c
     src/input.c
-    src/render/render_gl.c    # GLES2 renderer (upstream renderer_gles2.c path)
+    src/render_gl.c           # GLES2 renderer
 )
 
 # ---- Platform backend --------------------------------------------------------
