@@ -92,6 +92,9 @@ target_include_directories(wipegame PRIVATE
     src
     src/wipeout
     src/libs
+    src/GL
+    # devkitPro switch-mesa EGL/GLES2 headers
+    $ENV{DEVKITPRO}/portlibs/switch/include
 )
 
 # ---- Compile definitions -----------------------------------------------------
