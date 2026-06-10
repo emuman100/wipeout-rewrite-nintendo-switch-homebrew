@@ -89,6 +89,18 @@ static inline void glPolygonMode(unsigned int face, unsigned int mode) {
     (void)face; (void)mode;
 }
 
+/* mesa-switch requires GL_RGBA for FBO color attachments.
+ * GL_RGB is not color-renderable in GLES2 (EXT_texture_format_BGRA8888
+ * aside), so FBO completeness fails and mesa crashes if GL_RGB is used
+ * as the internalformat in glTexImage2D for a render target.
+ * Redefining GL_RGB → GL_RGBA is safe: all other call sites that pass
+ * GL_RGB as both internalformat and format still work correctly because
+ * GLES2 allows GL_RGBA textures to be sampled as if they were GL_RGB. */
+#ifdef GL_RGB
+#undef GL_RGB
+#define GL_RGB GL_RGBA
+#endif
+
 /* glGetTexImage is desktop GL only — not used in GLES2 path but
  * the function prototype exists in render_gl.c */
 static inline void glGetTexImage(unsigned int target, int level,
