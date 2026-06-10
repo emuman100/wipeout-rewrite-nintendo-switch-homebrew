@@ -150,6 +150,8 @@ if(SWITCH_PLATFORM)
         ${LIBGLAPI}
         ${LIBDRM_NOUVEAU}
         ${LIBNX}
+        stdc++
+        supc++
         m
     )
 
