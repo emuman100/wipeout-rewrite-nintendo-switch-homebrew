@@ -25,33 +25,13 @@
 static unsigned int glewExperimental __attribute__((unused));
 static inline unsigned int glewInit(void) { return 0; }
 
-/* VAOs — render_gl.c calls glGenVertexArrays/glBindVertexArray unconditionally.
- * GLES2 core doesn't have them, and calling eglGetProcAddress to load the OES
- * extension versions crashes inside mesa's extension dispatch table setup on
- * Switch firmware 19.0.1 with switch-mesa 20.1.0.
- *
- * Safe alternative: use no-op stubs. Both shaders (game and post) use the
- * same VBO and vertex_t layout. The vertex attribute setup
- * (glEnableVertexAttribArray + glVertexAttribPointer) executes once at shader
- * init and sets global GL state. Since neither shader reads attributes the
- * other enables, having extra enabled attributes from the game shader active
- * during the post blit is harmless — the post shader simply ignores them.
- *
- * If switch_vao_load() is called it is now a no-op. */
+/* VAOs — glGenVertexArrays/glBindVertexArray/glDeleteVertexArrays are
+ * intercepted at link time via -Wl,--wrap= in CMakeLists.txt.
+ * The __wrap_ implementations live in platform_switch.c.
+ * No stubs needed here. */
 
-static inline void switch_vao_load(void) { /* no-op — VAOs disabled */ }
-
-static GLuint _vao_counter = 0;
-static inline void glGenVertexArrays(GLsizei n, GLuint *arrays) {
-    if (arrays) {
-        for (GLsizei i = 0; i < n; i++)
-            arrays[i] = ++_vao_counter;  /* assign unique fake IDs */
-    }
-}
-static inline void glBindVertexArray(GLuint array) { (void)array; }
-static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
-    (void)n; (void)arrays;
-}
+/* switch_vao_load is kept as a no-op so the call in egl_init compiles. */
+static inline void switch_vao_load(void) { /* no-op */ }
 
 /* GLvoid is used in render_gl.c macros but not defined by GLES2 */
 #ifndef GLvoid
