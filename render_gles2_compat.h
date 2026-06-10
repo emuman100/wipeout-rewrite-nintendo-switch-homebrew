@@ -25,17 +25,22 @@
 static unsigned int glewExperimental __attribute__((unused));
 static inline unsigned int glewInit(void) { return 0; }
 
-/* VAOs — glGenVertexArrays/glBindVertexArray/glDeleteVertexArrays are
- * intercepted at link time via -Wl,--wrap= in CMakeLists.txt.
- * The __wrap_ implementations live in platform_switch.c.
- * We only need forward declarations here so the compiler accepts the calls
- * in render_gl.c. */
-void glGenVertexArrays(GLsizei n, GLuint *arrays);
-void glBindVertexArray(GLuint array);
-void glDeleteVertexArrays(GLsizei n, const GLuint *arrays);
-
-/* switch_vao_load is kept as a no-op so the call in egl_init compiles. */
-static inline void switch_vao_load(void) { /* no-op */ }
+/* VAOs — glGenVertexArrays/glBindVertexArray crash on Switch firmware 19.0.1
+ * with mesa 20.1.0 because mesa's dispatch table setup calls eglGetProcAddress
+ * internally which triggers a fatal crash in _mesa_CompressedTextureSubImage3D.
+ *
+ * --wrap linker flags only intercept some calls; mesa's internal dispatch
+ * routing bypasses them. The only reliable fix is to define these as
+ * MACROS so the preprocessor replaces every call site before the compiler
+ * or linker can route them to mesa.
+ *
+ * Safety: both shaders use the same vertex_t layout (pos@0 uv@12 color@20
+ * stride=24). Attribute state from shader init persists as global GL state.
+ * The post shader ignores the color attribute the game shader enables. */
+#define glGenVertexArrays(n, arrays) \
+    do { GLsizei _i; if (arrays) for (_i = 0; _i < (n); _i++) (arrays)[_i] = 1; } while(0)
+#define glBindVertexArray(id)              ((void)(id))
+#define glDeleteVertexArrays(n, arrays)    ((void)(n))
 
 /* GLvoid is used in render_gl.c macros but not defined by GLES2 */
 #ifndef GLvoid

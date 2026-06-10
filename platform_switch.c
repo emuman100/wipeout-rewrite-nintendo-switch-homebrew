@@ -73,29 +73,6 @@
  */
 u32 __nx_applet_type = AppletType_SystemApplication;
 
-/*
- * VAO wrapper functions — intercept mesa's glGenVertexArrays etc.
- *
- * _mesa_GenVertexArrays calls eglGetProcAddress internally on first use
- * to populate its dispatch table, which crashes on Switch firmware 19.0.1
- * with mesa 20.1.0. We use -Wl,--wrap= to redirect all VAO calls here
- * before they reach mesa.
- *
- * No-op stubs are safe: both shaders use the same vertex_t layout
- * (pos@0, uv@12, color@20, stride=24). Attribute state set at shader
- * init persists as global GL state. The post shader ignores the color
- * attribute the game shader enables.
- */
-static GLuint _vao_counter = 0;
-void __wrap_glGenVertexArrays(GLsizei n, GLuint *arrays) {
-    if (arrays) {
-        for (GLsizei i = 0; i < n; i++)
-            arrays[i] = ++_vao_counter;
-    }
-}
-void __wrap_glBindVertexArray(GLuint array)                       { (void)array; }
-void __wrap_glDeleteVertexArrays(GLsizei n, const GLuint *arrays) { (void)n; (void)arrays; }
-
 static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
 static EGLContext s_egl_context = EGL_NO_CONTEXT;
 static EGLSurface s_egl_surface = EGL_NO_SURFACE;
@@ -193,15 +170,6 @@ static bool egl_init(void) {
         TRACE("platform_switch: eglMakeCurrent failed");
         return false;
     }
-
-    /*
-     * Load VAO extension function pointers NOW, while the context is
-     * current and mesa's dispatch table is fully initialised.
-     * Calling eglGetProcAddress lazily (on first glGenVertexArrays call)
-     * crashes because it triggers mesa's extension table setup before
-     * the context is properly current. See render_gles2_compat.h.
-     */
-    switch_vao_load();
 
     /* Disable vsync so the game can manage its own timing */
     eglSwapInterval(s_egl_display, 0);

@@ -133,13 +133,6 @@ target_compile_options(wipegame PRIVATE
 # ---- Linker flags ------------------------------------------------------------
 target_link_options(wipegame PRIVATE
     -Wl,--gc-sections
-    # Wrap mesa's VAO symbols with no-op stubs defined in platform_switch.c.
-    # _mesa_GenVertexArrays calls eglGetProcAddress internally on first use
-    # which crashes on Switch firmware 19.0.1 with mesa 20.1.0.
-    # The --wrap flag intercepts the calls before they reach mesa.
-    -Wl,--wrap=glGenVertexArrays
-    -Wl,--wrap=glBindVertexArray
-    -Wl,--wrap=glDeleteVertexArrays
 )
 
 # ---- Switch libraries --------------------------------------------------------
