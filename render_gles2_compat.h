@@ -25,27 +25,43 @@ static unsigned int glewExperimental __attribute__((unused));
 static inline unsigned int glewInit(void) { return 0; }
 
 /* VAOs — render_gl.c calls glGenVertexArrays/glBindVertexArray unconditionally.
- * GLES2 core doesn't have them, but switch-mesa exposes them via the
- * GL_OES_vertex_array_object extension.
- * We must include the extension header to get the OES function prototypes,
- * then alias the core names to the OES names. */
+ * GLES2 core doesn't have them. On switch-mesa they are available via the
+ * GL_OES_vertex_array_object extension but NOT as directly linked symbols.
+ * We load them at runtime via eglGetProcAddress and provide thin wrappers. */
 #include <GLES2/gl2ext.h>
-#ifdef GL_OES_vertex_array_object
-extern GL_APICALL void GL_APIENTRY glGenVertexArraysOES(GLsizei n, GLuint *arrays);
-extern GL_APICALL void GL_APIENTRY glBindVertexArrayOES(GLuint array);
-extern GL_APICALL void GL_APIENTRY glDeleteVertexArraysOES(GLsizei n, const GLuint *arrays);
-#  define glGenVertexArrays    glGenVertexArraysOES
-#  define glBindVertexArray    glBindVertexArrayOES
-#  define glDeleteVertexArrays glDeleteVertexArraysOES
-#else
-static inline void glGenVertexArrays(int n, unsigned int *arrays) {
-    (void)n; if (arrays) *arrays = 1;
+
+typedef void (*PFNGLGENVERTEXARRAYSOESPROC)(GLsizei n, GLuint *arrays);
+typedef void (*PFNGLBINDVERTEXARRAYOESPROC)(GLuint array);
+typedef void (*PFNGLDELETEVERTEXARRAYSOESPROC)(GLsizei n, const GLuint *arrays);
+
+static PFNGLGENVERTEXARRAYSOESPROC    _glGenVertexArrays_fn    = NULL;
+static PFNGLBINDVERTEXARRAYOESPROC    _glBindVertexArray_fn    = NULL;
+static PFNGLDELETEVERTEXARRAYSOESPROC _glDeleteVertexArrays_fn = NULL;
+
+static inline void _switch_vao_init(void) {
+    if (!_glGenVertexArrays_fn) {
+        _glGenVertexArrays_fn    = (PFNGLGENVERTEXARRAYSOESPROC)
+            eglGetProcAddress("glGenVertexArraysOES");
+        _glBindVertexArray_fn    = (PFNGLBINDVERTEXARRAYOESPROC)
+            eglGetProcAddress("glBindVertexArrayOES");
+        _glDeleteVertexArrays_fn = (PFNGLDELETEVERTEXARRAYSOESPROC)
+            eglGetProcAddress("glDeleteVertexArraysOES");
+    }
 }
-static inline void glBindVertexArray(unsigned int array) { (void)array; }
-static inline void glDeleteVertexArrays(int n, const unsigned int *arrays) {
-    (void)n; (void)arrays;
+
+static inline void glGenVertexArrays(GLsizei n, GLuint *arrays) {
+    _switch_vao_init();
+    if (_glGenVertexArrays_fn) _glGenVertexArrays_fn(n, arrays);
+    else if (arrays) *arrays = 1;  /* no-op fallback */
 }
-#endif
+static inline void glBindVertexArray(GLuint array) {
+    _switch_vao_init();
+    if (_glBindVertexArray_fn) _glBindVertexArray_fn(array);
+}
+static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
+    _switch_vao_init();
+    if (_glDeleteVertexArrays_fn) _glDeleteVertexArrays_fn(n, arrays);
+}
 
 /* GLvoid is used in render_gl.c macros but not defined by GLES2 */
 #ifndef GLvoid
