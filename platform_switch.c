@@ -56,9 +56,22 @@
 #include "system.h"
 #include "mem.h"
 
-/* -------------------------------------------------------------------------
- * Internal state
- * ---------------------------------------------------------------------- */
+/*
+ * Override the libnx applet type to SystemApplication.
+ *
+ * switch-mesa calls viCreateManagedLayer() during eglInitialize() to create
+ * the display layer. This requires AppletResourceUserId which is only
+ * available when the applet type is SystemApplication (or LibraryApplet
+ * with explicit resource allocation).
+ *
+ * Without this override the default type is AppletType_Default which makes
+ * viCreateManagedLayer return 2168-0002 (0x4a8), crashing immediately on
+ * launch. This is a known requirement for any homebrew NRO using EGL/mesa.
+ *
+ * AppletType_SystemApplication gives full display layer access and works
+ * correctly when launched from hbmenu in both normal and "hold R" modes.
+ */
+u32 __nx_applet_type = AppletType_SystemApplication;
 
 static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
 static EGLContext s_egl_context = EGL_NO_CONTEXT;
@@ -556,9 +569,18 @@ int main(int argc, char *argv[]) {
      * the OS waits for our cleanup before force-terminating (up to 15 s).
      * This protects in-flight save writes and ensures audio/EGL teardown
      * completes cleanly before hbmenu regains control.
-     * appletUnlockExit() is called after all cleanup below.
+     *
+     * appletLockExit is only valid when running as a full Application
+     * (launched via "hold R" in hbmenu). In LibraryApplet mode (normal
+     * hbmenu launch) this call fails with am error 2168-0002 and crashes.
+     * We check the applet type first and only lock if appropriate.
      */
-    appletLockExit();
+    bool exit_locked = false;
+    if (appletGetAppletType() == AppletType_Application ||
+        appletGetAppletType() == AppletType_SystemApplication) {
+        appletLockExit();
+        exit_locked = true;
+    }
 
     /* ---- libnx services ---- */
 
@@ -568,7 +590,7 @@ int main(int argc, char *argv[]) {
     /* ---- EGL + GLES2 ---- */
     if (!egl_init()) {
         TRACE("platform_switch: EGL init failed – aborting");
-        appletUnlockExit();
+        if (exit_locked) appletUnlockExit();
         return 1;
     }
 
@@ -606,7 +628,7 @@ int main(int argc, char *argv[]) {
      * completes. If we exited normally (in-game quit), this is a no-op
      * and main() returns 0, handing control back to hbmenu.
      */
-    appletUnlockExit();
+    if (exit_locked) appletUnlockExit();
 
     return 0;
 }
