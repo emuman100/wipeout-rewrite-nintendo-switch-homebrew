@@ -26,43 +26,31 @@ static unsigned int glewExperimental __attribute__((unused));
 static inline unsigned int glewInit(void) { return 0; }
 
 /* VAOs — render_gl.c calls glGenVertexArrays/glBindVertexArray unconditionally.
- * GLES2 core doesn't have them. On switch-mesa they are available via the
- * GL_OES_vertex_array_object extension but NOT as directly linked symbols.
+ * GLES2 core doesn't have them, and calling eglGetProcAddress to load the OES
+ * extension versions crashes inside mesa's extension dispatch table setup on
+ * Switch firmware 19.0.1 with switch-mesa 20.1.0.
  *
- * IMPORTANT: eglGetProcAddress must be called AFTER eglMakeCurrent with a
- * current context. Calling it lazily on first use crashes mesa because it
- * triggers extension dispatch table initialisation before the context is
- * fully ready. Instead, platform_switch.c calls switch_vao_load() explicitly
- * from egl_init() immediately after eglMakeCurrent succeeds.
- */
+ * Safe alternative: use no-op stubs. Both shaders (game and post) use the
+ * same VBO and vertex_t layout. The vertex attribute setup
+ * (glEnableVertexAttribArray + glVertexAttribPointer) executes once at shader
+ * init and sets global GL state. Since neither shader reads attributes the
+ * other enables, having extra enabled attributes from the game shader active
+ * during the post blit is harmless — the post shader simply ignores them.
+ *
+ * If switch_vao_load() is called it is now a no-op. */
 
-typedef void (*PFNGLGENVERTEXARRAYSOESPROC)(GLsizei n, GLuint *arrays);
-typedef void (*PFNGLBINDVERTEXARRAYOESPROC)(GLuint array);
-typedef void (*PFNGLDELETEVERTEXARRAYSOESPROC)(GLsizei n, const GLuint *arrays);
+static inline void switch_vao_load(void) { /* no-op — VAOs disabled */ }
 
-static PFNGLGENVERTEXARRAYSOESPROC    _glGenVertexArrays_fn    = NULL;
-static PFNGLBINDVERTEXARRAYOESPROC    _glBindVertexArray_fn    = NULL;
-static PFNGLDELETEVERTEXARRAYSOESPROC _glDeleteVertexArrays_fn = NULL;
-
-/* Called explicitly from egl_init() after eglMakeCurrent. */
-static inline void switch_vao_load(void) {
-    _glGenVertexArrays_fn    = (PFNGLGENVERTEXARRAYSOESPROC)
-        eglGetProcAddress("glGenVertexArraysOES");
-    _glBindVertexArray_fn    = (PFNGLBINDVERTEXARRAYOESPROC)
-        eglGetProcAddress("glBindVertexArrayOES");
-    _glDeleteVertexArrays_fn = (PFNGLDELETEVERTEXARRAYSOESPROC)
-        eglGetProcAddress("glDeleteVertexArraysOES");
-}
-
+static GLuint _vao_counter = 0;
 static inline void glGenVertexArrays(GLsizei n, GLuint *arrays) {
-    if (_glGenVertexArrays_fn) _glGenVertexArrays_fn(n, arrays);
-    else if (arrays) *arrays = 1;  /* no-op fallback */
+    if (arrays) {
+        for (GLsizei i = 0; i < n; i++)
+            arrays[i] = ++_vao_counter;  /* assign unique fake IDs */
+    }
 }
-static inline void glBindVertexArray(GLuint array) {
-    if (_glBindVertexArray_fn) _glBindVertexArray_fn(array);
-}
+static inline void glBindVertexArray(GLuint array) { (void)array; }
 static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
-    if (_glDeleteVertexArrays_fn) _glDeleteVertexArrays_fn(n, arrays);
+    (void)n; (void)arrays;
 }
 
 /* GLvoid is used in render_gl.c macros but not defined by GLES2 */
