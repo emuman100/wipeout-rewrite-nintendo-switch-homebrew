@@ -28,7 +28,11 @@ static inline unsigned int glewInit(void) { return 0; }
 /* VAOs — glGenVertexArrays/glBindVertexArray/glDeleteVertexArrays are
  * intercepted at link time via -Wl,--wrap= in CMakeLists.txt.
  * The __wrap_ implementations live in platform_switch.c.
- * No stubs needed here. */
+ * We only need forward declarations here so the compiler accepts the calls
+ * in render_gl.c. */
+void glGenVertexArrays(GLsizei n, GLuint *arrays);
+void glBindVertexArray(GLuint array);
+void glDeleteVertexArrays(GLsizei n, const GLuint *arrays);
 
 /* switch_vao_load is kept as a no-op so the call in egl_init compiles. */
 static inline void switch_vao_load(void) { /* no-op */ }
