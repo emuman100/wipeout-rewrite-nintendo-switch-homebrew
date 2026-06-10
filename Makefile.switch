@@ -57,7 +57,7 @@ LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) \
 # list them explicitly.  nx must come after SDL2 in the link order.
 #---------------------------------------------------------------------------------
 LIBS     := $(shell $(DEVKITPRO)/portlibs/switch/bin/sdl2-config --libs 2>/dev/null) \
-            -lnx -lm
+            -lGLESv2 -lnx -lm
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX)
 

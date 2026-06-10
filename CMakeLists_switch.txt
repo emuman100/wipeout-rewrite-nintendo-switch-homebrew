@@ -146,6 +146,7 @@ if(SWITCH_PLATFORM)
     target_link_libraries(wipegame PRIVATE
         SDL2::SDL2
         ${LIBNX}
+        -lGLESv2
         stdc++
         supc++
         m
