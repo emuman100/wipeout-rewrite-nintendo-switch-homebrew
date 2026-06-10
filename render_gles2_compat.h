@@ -16,6 +16,7 @@
 #include <GLES2/gl2ext.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <stddef.h>  /* NULL */
 
 /* Stub out glew — render_gl.c calls glewInit() and sets glewExperimental
  * on the non-Apple unix path. We no-op them here so the code compiles.
@@ -28,7 +29,6 @@ static inline unsigned int glewInit(void) { return 0; }
  * GLES2 core doesn't have them. On switch-mesa they are available via the
  * GL_OES_vertex_array_object extension but NOT as directly linked symbols.
  * We load them at runtime via eglGetProcAddress and provide thin wrappers. */
-#include <GLES2/gl2ext.h>
 
 typedef void (*PFNGLGENVERTEXARRAYSOESPROC)(GLsizei n, GLuint *arrays);
 typedef void (*PFNGLBINDVERTEXARRAYOESPROC)(GLuint array);
