@@ -26,13 +26,18 @@ static inline unsigned int glewInit(void) { return 0; }
 
 /* VAOs — render_gl.c calls glGenVertexArrays/glBindVertexArray unconditionally.
  * GLES2 core doesn't have them, but switch-mesa exposes them via the
- * GL_OES_vertex_array_object extension. Map the core names to the OES names. */
+ * GL_OES_vertex_array_object extension.
+ * We must include the extension header to get the OES function prototypes,
+ * then alias the core names to the OES names. */
+#include <GLES2/gl2ext.h>
 #ifdef GL_OES_vertex_array_object
-#  define glGenVertexArrays   glGenVertexArraysOES
-#  define glBindVertexArray   glBindVertexArrayOES
+extern GL_APICALL void GL_APIENTRY glGenVertexArraysOES(GLsizei n, GLuint *arrays);
+extern GL_APICALL void GL_APIENTRY glBindVertexArrayOES(GLuint array);
+extern GL_APICALL void GL_APIENTRY glDeleteVertexArraysOES(GLsizei n, const GLuint *arrays);
+#  define glGenVertexArrays    glGenVertexArraysOES
+#  define glBindVertexArray    glBindVertexArrayOES
 #  define glDeleteVertexArrays glDeleteVertexArraysOES
 #else
-/* Fallback no-op stubs if the extension isn't declared yet */
 static inline void glGenVertexArrays(int n, unsigned int *arrays) {
     (void)n; if (arrays) *arrays = 1;
 }
