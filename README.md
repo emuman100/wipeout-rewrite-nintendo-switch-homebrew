@@ -14,8 +14,10 @@ A Nintendo Switch NRO port of [phoboslab/wipeout-rewrite](https://github.com/pho
 - The following devkitPro packages:
 
 ```bash
-dkp-pacman -S switch-dev switch-mesa switch-libdrm_nouveau
+dkp-pacman -S switch-dev switch-sdl2
 ```
+
+(`switch-sdl2` pulls in `switch-mesa` and `switch-libdrm_nouveau` as dependencies.)
 
 - CMake ≥ 3.13, or GNU make
 
@@ -236,7 +238,7 @@ graphics settings, and race progress all persist here across sessions.
 │                                                              │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │  Graphics   │  │    Audio     │  │      Input        │  │
-│  │  EGL+GLES2  │  │ audout/libnx │  │  padXxx / libnx   │  │
+│  │  SDL2+GLES2 │  │ audout/libnx │  │  padXxx / libnx   │  │
 │  │ mesa-switch │  │ 48 kHz s16le │  │ Joy-Con, handheld │  │
 │  │  1280×720   │  │  2 DMA bufs  │  │  Pro Controller   │  │
 │  └─────────────┘  └──────────────┘  └───────────────────┘  │
@@ -257,19 +259,21 @@ graphics settings, and race progress all persist here across sessions.
 
 ### Graphics
 
-**Backend:** OpenGL ES 2.0 via EGL and mesa-switch (Nouveau driver for
-Tegra X1). The upstream `render_gl.c` renderer is compiled with
+**Backend:** OpenGL ES 2.0 via SDL2 (window and GL context creation) and
+mesa-switch (Nouveau driver for Tegra X1). SDL2 is used exclusively for
+video initialisation; audio, input, and filesystem continue to use libnx
+directly. The upstream `render_gl.c` renderer is compiled with
 `-DUSE_GLES2=1`, which enables GLSL `precision highp float;` qualifiers
 and selects `GL_DEPTH_COMPONENT16` for the renderbuffer — both required
 for strict GLES2 compliance.
 
-**Framebuffer:** The NWindow is fixed at **1280×720**. In handheld mode
-this is native. In docked mode the Switch hardware compositor upscales
-to the TV's output resolution automatically; no application-side
-reconfiguration is needed.
+**Framebuffer:** The SDL2 window is created at **1280×720** with
+`SDL_WINDOW_FULLSCREEN`. In handheld mode this is native. In docked mode
+the Switch hardware compositor upscales to the TV's output resolution
+automatically; no application-side reconfiguration is needed.
 
 **Render pipeline:** The game renders to an offscreen FBO (render-to-texture),
-then blits it to the EGL surface via a fullscreen quad. This supports
+then blits it to the SDL2 window surface via a fullscreen quad. This supports
 the three built-in render resolutions (240p, 480p, native 720p) and both
 post-effect modes (none, CRT scanline), all selectable in-game.
 
@@ -278,8 +282,8 @@ textures. The CPU-side packing buffer is allocated from the hunk
 allocator temporarily during load and freed immediately after
 upload — it does not persist at runtime.
 
-**Dock/undock transitions:** EGL surfaces and GL contexts survive a
-dock/undock event transparently via mesa-switch. The game loop continues
+**Dock/undock transitions:** SDL2's GL context and the underlying mesa-switch
+EGL surface survive a dock/undock event transparently. The game loop continues
 uninterrupted across mode changes.
 
 ---
@@ -384,7 +388,7 @@ freed before gameplay begins.
 
 | Item | Notes |
 |---|---|
-| **Docked 1080p rendering** | Currently renders at 720p in both modes; hardware upscales when docked. Native 1080p is achievable by polling `appletGetOperationMode()` and calling `nwindowSetCrop()` + `system_resize()` per frame. |
+| **Docked 1080p rendering** | Currently renders at 720p in both modes; hardware upscales when docked. Native 1080p is achievable by polling `appletGetOperationMode()` and calling `SDL_SetWindowSize()` + `system_resize()` per frame. |
 | **Rumble** | libnx exposes `hidSendVibrationValue()`; mapping it to ship collision events in `ship.c` would improve feel. |
 | **Touchscreen** | Not implemented. All input is button-based. |
 | **Analog steering default** | Left stick steers menus only by default. Remap A_LEFT/A_RIGHT to the stick in Options → Controls for analog ship steering. |

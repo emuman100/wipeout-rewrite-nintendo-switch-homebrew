@@ -8,7 +8,8 @@
 # Prerequisites:
 #   devkitPro devkitA64 toolchain  (https://devkitpro.org/wiki/Getting_Started)
 #   dkp-pacman packages:
-#     switch-dev switch-mesa switch-libdrm_nouveau
+#     switch-dev switch-sdl2
+#     switch-mesa switch-libdrm_nouveau  (GLES2 driver, pulled in by switch-sdl2)
 #
 # Usage:
 #   export DEVKITPRO=/opt/devkitpro   # or wherever you installed it
@@ -41,7 +42,9 @@ CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections \
             -DUSE_GLES2=1 \
             -std=gnu11
 
-CFLAGS   += $(shell pkg-config --cflags libdrm 2>/dev/null)
+CFLAGS   += $(shell $(DEVKITPRO)/portlibs/switch/bin/sdl2-config --cflags 2>/dev/null)
+# Force-include the GLES2 compat header into every TU (same as CMake's -include flag)
+CFLAGS   += -include $(CURDIR)/src/render_gles2_compat.h
 
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) \
             -Wl,-Map,$(BUILD)/$(TARGET).map \
@@ -49,9 +52,12 @@ LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) \
 
 #---------------------------------------------------------------------------------
 # Libraries
-# Order matters: GLES2 → EGL → glapi → drm_nouveau → nx → m
+# SDL2 owns window + GL context creation; libnx handles audio/input/fs.
+# SDL2 on Switch links EGL + mesa + drm_nouveau transitively — no need to
+# list them explicitly.  nx must come after SDL2 in the link order.
 #---------------------------------------------------------------------------------
-LIBS     := -lGLESv2 -lEGL -lglapi -ldrm_nouveau -lnx -lm
+LIBS     := $(shell $(DEVKITPRO)/portlibs/switch/bin/sdl2-config --libs 2>/dev/null) \
+            -lnx -lm
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX)
 

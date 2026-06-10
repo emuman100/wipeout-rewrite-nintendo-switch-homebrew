@@ -15,8 +15,8 @@
 # Output: build-switch/wipegame.nro  (and .elf)
 #
 # Prerequisites (install via dkp-pacman):
-#   switch-dev  switch-mesa  switch-libdrm_nouveau
-#   switch-glad (optional but handy)  deko3d (not used here)
+#   switch-dev  switch-sdl2
+#   switch-mesa  switch-libdrm_nouveau  (GLES2 driver, pulled in by switch-sdl2)
 #
 cmake_minimum_required(VERSION 3.16)
 
@@ -92,7 +92,7 @@ target_include_directories(wipegame PRIVATE
     src
     src/wipeout
     src/libs
-    # devkitPro switch-mesa EGL/GLES2 headers
+    # devkitPro SDL2 headers (EGL/GLES2 pulled in transitively by switch-sdl2)
     $ENV{DEVKITPRO}/portlibs/switch/include
 )
 
@@ -137,18 +137,14 @@ target_link_options(wipegame PRIVATE
 
 # ---- Switch libraries --------------------------------------------------------
 if(SWITCH_PLATFORM)
-    # devkitPro supplies find-modules for libnx, EGL, etc.
+    # SDL2 owns window + GL context; libnx handles audio, input, and fs.
+    # SDL2 on Switch links EGL + mesa + drm_nouveau transitively.
+    find_package(SDL2 REQUIRED)   # devkitPro provides FindSDL2.cmake via Switch.cmake
+
     find_library(LIBNX nx REQUIRED)
-    find_library(LIBDRM_NOUVEAU drm_nouveau REQUIRED)
-    find_library(LIBGLAPI glapi REQUIRED)
-    find_library(LIBMESA_EGL EGL REQUIRED)
-    find_library(LIBGLESV2 GLESv2 REQUIRED)
 
     target_link_libraries(wipegame PRIVATE
-        ${LIBGLESV2}
-        ${LIBMESA_EGL}
-        ${LIBGLAPI}
-        ${LIBDRM_NOUVEAU}
+        SDL2::SDL2
         ${LIBNX}
         stdc++
         supc++

@@ -8,9 +8,9 @@
  * Build requirements:
  *   devkitPro devkitA64 r19+
  *   libnx 4.x
- *   switch-mesa / switch-libdrm (for EGL + OpenGL ES 2)
- *   switch-sdl2  (optional – see AUDIO section; audren path used by default)
- *   deko3d is NOT used; we rely on OpenGL ES 2 via EGL (mesa-switch)
+ *   switch-sdl2  (for video / GL context creation only)
+ *   switch-mesa / switch-libdrm (GLES2 driver, loaded by SDL2's EGL backend)
+ *   deko3d is NOT used; we rely on OpenGL ES 2 via SDL2 + EGL (mesa-switch)
  *
  * The wipeout-rewrite CMake flag to pair with this file:
  *   -DPLATFORM=SWITCH -DRENDERER=GLES2
@@ -45,10 +45,9 @@
 /* devkitPro / libnx */
 #include <switch.h>
 
-/* EGL + GLES2 via mesa-switch */
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
+/* SDL2 — used exclusively for window creation and GL context management.
+ * Audio, input, and filesystem continue to use libnx APIs directly. */
+#include <SDL2/SDL.h>
 
 /* wipeout-rewrite internal headers (paths relative to project src/) */
 #include "platform.h"
@@ -73,11 +72,9 @@
  */
 u32 __nx_applet_type = AppletType_SystemApplication;
 
-static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
-static EGLContext s_egl_context = EGL_NO_CONTEXT;
-static EGLSurface s_egl_surface = EGL_NO_SURFACE;
-
-static NWindow *s_nwindow = NULL;
+/* SDL2 video state */
+static SDL_Window   *s_sdl_window  = NULL;
+static SDL_GLContext s_sdl_glctx   = NULL;
 
 static bool s_wants_exit = false;
 
@@ -103,92 +100,68 @@ static PadState s_pad;
 #define AUDIO_BUFFER_FRAMES 2
 
 /* -------------------------------------------------------------------------
- * EGL / OpenGL ES 2 initialisation
+ * SDL2 video / GL context initialisation
+ *
+ * SDL2 is used exclusively for window creation and GLES2 context management.
+ * Everything else (audio, input, filesystem) continues to use libnx directly.
  * ---------------------------------------------------------------------- */
 
-static bool egl_init(void) {
-    /* Grab the default NWindow (framebuffer window) */
-    s_nwindow = nwindowGetDefault();
-    if (!s_nwindow) {
-        TRACE("platform_switch: nwindowGetDefault() failed");
+static bool sdl_video_init(void) {
+    /* Initialise only the video subsystem — audio is handled by libnx audout */
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        TRACE("platform_switch: SDL_Init(VIDEO) failed: %s", SDL_GetError());
         return false;
     }
 
-    nwindowSetDimensions(s_nwindow, SWITCH_SCREEN_W, SWITCH_SCREEN_H);
+    /* Request OpenGL ES 2 context */
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 
-    s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (s_egl_display == EGL_NO_DISPLAY) {
-        TRACE("platform_switch: eglGetDisplay failed");
+    /* 8-bit colour channels + 24-bit depth — matches former EGL config */
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE,   8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,  8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+
+    s_sdl_window = SDL_CreateWindow(
+        "wipEout Rewrite",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        SWITCH_SCREEN_W, SWITCH_SCREEN_H,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN
+    );
+    if (!s_sdl_window) {
+        TRACE("platform_switch: SDL_CreateWindow failed: %s", SDL_GetError());
+        SDL_Quit();
         return false;
     }
 
-    EGLint major, minor;
-    if (!eglInitialize(s_egl_display, &major, &minor)) {
-        TRACE("platform_switch: eglInitialize failed");
+    s_sdl_glctx = SDL_GL_CreateContext(s_sdl_window);
+    if (!s_sdl_glctx) {
+        TRACE("platform_switch: SDL_GL_CreateContext failed: %s", SDL_GetError());
+        SDL_DestroyWindow(s_sdl_window);
+        s_sdl_window = NULL;
+        SDL_Quit();
         return false;
     }
 
-    /* Request OpenGL ES 2 */
-    eglBindAPI(EGL_OPENGL_ES_API);
-
-    static const EGLint config_attribs[] = {
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
-        EGL_RED_SIZE,        8,
-        EGL_GREEN_SIZE,      8,
-        EGL_BLUE_SIZE,       8,
-        EGL_ALPHA_SIZE,      8,
-        EGL_DEPTH_SIZE,      24,
-        EGL_NONE
-    };
-
-    EGLConfig config;
-    EGLint num_configs;
-    if (!eglChooseConfig(s_egl_display, config_attribs, &config, 1, &num_configs) || num_configs == 0) {
-        TRACE("platform_switch: eglChooseConfig failed");
-        return false;
-    }
-
-    s_egl_surface = eglCreateWindowSurface(s_egl_display, config,
-                                           (EGLNativeWindowType)s_nwindow, NULL);
-    if (s_egl_surface == EGL_NO_SURFACE) {
-        TRACE("platform_switch: eglCreateWindowSurface failed (0x%x)", eglGetError());
-        return false;
-    }
-
-    static const EGLint ctx_attribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2,
-        EGL_NONE
-    };
-    s_egl_context = eglCreateContext(s_egl_display, config, EGL_NO_CONTEXT, ctx_attribs);
-    if (s_egl_context == EGL_NO_CONTEXT) {
-        TRACE("platform_switch: eglCreateContext failed");
-        return false;
-    }
-
-    if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
-        TRACE("platform_switch: eglMakeCurrent failed");
-        return false;
-    }
-
-    /* Disable vsync so the game can manage its own timing */
-    eglSwapInterval(s_egl_display, 0);
+    /* Disable vsync — the game manages its own frame timing */
+    SDL_GL_SetSwapInterval(0);
 
     return true;
 }
 
-static void egl_cleanup(void) {
-    if (s_egl_display != EGL_NO_DISPLAY) {
-        eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (s_egl_context != EGL_NO_CONTEXT)
-            eglDestroyContext(s_egl_display, s_egl_context);
-        if (s_egl_surface != EGL_NO_SURFACE)
-            eglDestroySurface(s_egl_display, s_egl_surface);
-        eglTerminate(s_egl_display);
+static void sdl_video_cleanup(void) {
+    if (s_sdl_glctx) {
+        SDL_GL_DeleteContext(s_sdl_glctx);
+        s_sdl_glctx = NULL;
     }
-    s_egl_display = EGL_NO_DISPLAY;
-    s_egl_context = EGL_NO_CONTEXT;
-    s_egl_surface = EGL_NO_SURFACE;
+    if (s_sdl_window) {
+        SDL_DestroyWindow(s_sdl_window);
+        s_sdl_window = NULL;
+    }
+    SDL_Quit();
 }
 
 /* -------------------------------------------------------------------------
@@ -435,7 +408,7 @@ void platform_video_init(void) {
 }
 
 void platform_video_cleanup(void) {
-    egl_cleanup();
+    sdl_video_cleanup();
 }
 
 void platform_prepare_frame(void) {
@@ -444,7 +417,7 @@ void platform_prepare_frame(void) {
 
 void platform_end_frame(void) {
     /* Present the rendered frame */
-    eglSwapBuffers(s_egl_display, s_egl_surface);
+    SDL_GL_SwapWindow(s_sdl_window);
 
     /* Push audio for this frame */
     audio_update();
@@ -587,9 +560,9 @@ int main(int argc, char *argv[]) {
     /* Create sdmc:/switch/wipegame/userdata/ if it doesn't exist yet */
     userdata_dir_init();
 
-    /* ---- EGL + GLES2 ---- */
-    if (!egl_init()) {
-        TRACE("platform_switch: EGL init failed – aborting");
+    /* ---- SDL2 video + GLES2 context ---- */
+    if (!sdl_video_init()) {
+        TRACE("platform_switch: SDL2 video init failed – aborting");
         if (exit_locked) appletUnlockExit();
         return 1;
     }
