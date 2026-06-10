@@ -28,7 +28,13 @@ static inline unsigned int glewInit(void) { return 0; }
 /* VAOs — render_gl.c calls glGenVertexArrays/glBindVertexArray unconditionally.
  * GLES2 core doesn't have them. On switch-mesa they are available via the
  * GL_OES_vertex_array_object extension but NOT as directly linked symbols.
- * We load them at runtime via eglGetProcAddress and provide thin wrappers. */
+ *
+ * IMPORTANT: eglGetProcAddress must be called AFTER eglMakeCurrent with a
+ * current context. Calling it lazily on first use crashes mesa because it
+ * triggers extension dispatch table initialisation before the context is
+ * fully ready. Instead, platform_switch.c calls switch_vao_load() explicitly
+ * from egl_init() immediately after eglMakeCurrent succeeds.
+ */
 
 typedef void (*PFNGLGENVERTEXARRAYSOESPROC)(GLsizei n, GLuint *arrays);
 typedef void (*PFNGLBINDVERTEXARRAYOESPROC)(GLuint array);
@@ -38,28 +44,24 @@ static PFNGLGENVERTEXARRAYSOESPROC    _glGenVertexArrays_fn    = NULL;
 static PFNGLBINDVERTEXARRAYOESPROC    _glBindVertexArray_fn    = NULL;
 static PFNGLDELETEVERTEXARRAYSOESPROC _glDeleteVertexArrays_fn = NULL;
 
-static inline void _switch_vao_init(void) {
-    if (!_glGenVertexArrays_fn) {
-        _glGenVertexArrays_fn    = (PFNGLGENVERTEXARRAYSOESPROC)
-            eglGetProcAddress("glGenVertexArraysOES");
-        _glBindVertexArray_fn    = (PFNGLBINDVERTEXARRAYOESPROC)
-            eglGetProcAddress("glBindVertexArrayOES");
-        _glDeleteVertexArrays_fn = (PFNGLDELETEVERTEXARRAYSOESPROC)
-            eglGetProcAddress("glDeleteVertexArraysOES");
-    }
+/* Called explicitly from egl_init() after eglMakeCurrent. */
+static inline void switch_vao_load(void) {
+    _glGenVertexArrays_fn    = (PFNGLGENVERTEXARRAYSOESPROC)
+        eglGetProcAddress("glGenVertexArraysOES");
+    _glBindVertexArray_fn    = (PFNGLBINDVERTEXARRAYOESPROC)
+        eglGetProcAddress("glBindVertexArrayOES");
+    _glDeleteVertexArrays_fn = (PFNGLDELETEVERTEXARRAYSOESPROC)
+        eglGetProcAddress("glDeleteVertexArraysOES");
 }
 
 static inline void glGenVertexArrays(GLsizei n, GLuint *arrays) {
-    _switch_vao_init();
     if (_glGenVertexArrays_fn) _glGenVertexArrays_fn(n, arrays);
     else if (arrays) *arrays = 1;  /* no-op fallback */
 }
 static inline void glBindVertexArray(GLuint array) {
-    _switch_vao_init();
     if (_glBindVertexArray_fn) _glBindVertexArray_fn(array);
 }
 static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
-    _switch_vao_init();
     if (_glDeleteVertexArrays_fn) _glDeleteVertexArrays_fn(n, arrays);
 }
 

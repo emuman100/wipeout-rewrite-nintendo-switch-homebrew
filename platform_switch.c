@@ -171,6 +171,15 @@ static bool egl_init(void) {
         return false;
     }
 
+    /*
+     * Load VAO extension function pointers NOW, while the context is
+     * current and mesa's dispatch table is fully initialised.
+     * Calling eglGetProcAddress lazily (on first glGenVertexArrays call)
+     * crashes because it triggers mesa's extension table setup before
+     * the context is properly current. See render_gles2_compat.h.
+     */
+    switch_vao_load();
+
     /* Disable vsync so the game can manage its own timing */
     eglSwapInterval(s_egl_display, 0);
 
