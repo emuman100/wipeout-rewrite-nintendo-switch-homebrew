@@ -93,12 +93,17 @@ static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
 #  define GL_LINE 0x1B01
 #endif
 
-/* VAOs — used in render_gl.c but not in GLES2 core.
- * switch-mesa provides them via OES extension but the GLES2 path
- * in render_gl.c guards the VAO calls with USE_GLES2, so these
- * are just safety stubs. */
-#ifndef GL_VERTEX_ARRAY_BINDING
-#  define GL_VERTEX_ARRAY_BINDING 0x85B5
+/* Anisotropic filtering extension constants.
+ * render_gl.c queries and sets these unconditionally. Without the defines
+ * glGetFloatv/glTexParameterf would receive an unknown enum, generating
+ * GL_INVALID_ENUM and leaving anisotropy uninitialised.
+ * switch-mesa/Nouveau does support EXT_texture_filter_anisotropic,
+ * so these will be honoured at runtime. */
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#  define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
+#endif
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+#  define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
 #endif
 
 static inline void glPolygonMode(unsigned int face, unsigned int mode) {
