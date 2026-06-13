@@ -28,6 +28,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <stddef.h>  /* NULL */
+#include <string.h>  /* memcpy */
 
 /* Stub out glew — render_gl.c calls glewInit() and sets glewExperimental
  * on the non-Apple unix path. We no-op them here so the code compiles.
@@ -297,9 +298,15 @@ GL_FUNC_DECL(_pfn_glViewport,              glViewport)
 #ifdef RENDER_GL_FUNC_IMPL
 static inline int render_init_gl_funcs(void) {
     int failed = 0;
-    #define LOAD(name) \
-        _gl_##name = (_pfn_##name)eglGetProcAddress(#name); \
-        if (!_gl_##name) failed++;
+    /* Use memcpy to copy the raw pointer bits from eglGetProcAddress into the
+     * function pointer variable. This matches how ppsspp/rglgen does it on
+     * Switch — a direct cast can go through an extra indirection in mesa-switch's
+     * dispatch table, producing a valid-looking but broken function pointer. */
+    #define LOAD(name) do { \
+        void *_p = (void*)eglGetProcAddress(#name); \
+        if (_p) { memcpy(&_gl_##name, &_p, sizeof(_p)); } \
+        else { failed++; } \
+    } while(0);
 
     LOAD(glAttachShader)
     LOAD(glBindBuffer)

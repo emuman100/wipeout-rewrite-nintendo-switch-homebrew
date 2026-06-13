@@ -218,6 +218,11 @@ static bool egl_init(void) {
     } else {
         TRACE("egl_init: all GL functions resolved OK");
     }
+    /* Log key shader function pointers to detect non-null but broken stubs */
+    TRACE("egl_init: glCreateShader=%p glCompileShader=%p glCreateProgram=%p",
+        (void*)_gl_glCreateShader, (void*)_gl_glCompileShader, (void*)_gl_glCreateProgram);
+    TRACE("egl_init: glShaderSource=%p glLinkProgram=%p glUseProgram=%p",
+        (void*)_gl_glShaderSource, (void*)_gl_glLinkProgram, (void*)_gl_glUseProgram);
 
     /* Disable vsync so the game can manage its own timing */
     eglSwapInterval(s_egl_display, 0);
