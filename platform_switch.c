@@ -517,8 +517,18 @@ void platform_prepare_frame(void) {
 }
 
 void platform_end_frame(void) {
-    /* Present the rendered frame */
-    eglSwapBuffers(s_egl_display, s_egl_surface);
+    /* Log GL errors and swap result for first few frames */
+    static int frame_count = 0;
+    if (frame_count < 5) {
+        GLenum gl_err = glGetError();
+        EGLBoolean swap_ok = eglSwapBuffers(s_egl_display, s_egl_surface);
+        EGLint egl_err = eglGetError();
+        TRACE("frame %d: glGetError=0x%x eglSwapBuffers=%d eglGetError=0x%x",
+            frame_count, gl_err, (int)swap_ok, (int)egl_err);
+        frame_count++;
+    } else {
+        eglSwapBuffers(s_egl_display, s_egl_surface);
+    }
 
     /* Push audio for this frame */
     audio_update();
