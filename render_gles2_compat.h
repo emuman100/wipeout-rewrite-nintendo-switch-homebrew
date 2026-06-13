@@ -27,37 +27,122 @@
 #include <EGL/eglext.h>
 #include <stddef.h>  /* NULL */
 
-/* Stub out glew — render_gl.c calls glewInit() and sets glewExperimental
- * on the non-Apple unix path. We no-op them here so the code compiles.
- * __attribute__((unused)) suppresses the "defined but not used" warning
- * in every translation unit that doesn't reference glewExperimental. */
+/* Stub out glew */
 static unsigned int glewExperimental __attribute__((unused));
 static inline unsigned int glewInit(void) { return 0; }
 
-/* VAOs — GL_OES_vertex_array_object is present in mesa-switch's static
- * libGLESv2 (confirmed by strings on the linked binary). The earlier VAO
- * crashes were caused by the eglGetProcAddress dispatch stub path, which
- * is now avoided by linking libGLESv2 statically. Real VAO functions work.
+/* -------------------------------------------------------------------------
+ * VAO emulation — Option 3
  *
- * The core names (glGenVertexArrays, glBindVertexArray) are not declared
- * in <GLES2/gl2.h> — they are OES extensions. Declare them here as inline
- * wrappers around the OES symbols which ARE present in static libGLESv2.
+ * VAO core names (glGenVertexArrays/glBindVertexArray) are not declared in
+ * the Switch SDK GLES2 headers, and the OES extension names are also absent.
+ * Real VAO hardware support cannot be used via the headers.
  *
- * render_gl.c also references glGenVertexArraysAPPLE/glBindVertexArrayAPPLE
- * on the Apple path — redirect those to the OES functions too. */
-static inline void glGenVertexArrays(GLsizei n, GLuint *arrays) {
-    glGenVertexArraysOES(n, arrays);
-}
-static inline void glBindVertexArray(GLuint array) {
-    glBindVertexArrayOES(array);
-}
-static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
-    glDeleteVertexArraysOES(n, arrays);
+ * render_gl.c uses VAOs solely to save and restore vertex attribute layout
+ * when switching between the game shader and the post shader via use_program().
+ * Without VAO restore, the post shader inherits the game shader's attribute
+ * layout — wrong indices/offsets — and the fullscreen blit produces a black
+ * screen.
+ *
+ * Solution: fake VAO IDs + replay the known vertex_t layout on bind.
+ *
+ * vertex_t layout (from types.h, confirmed by ELF analysis, never changes):
+ *   pos:   vec3_t  @ offset  0, stride 24, 3 floats
+ *   uv:    vec2_t  @ offset 12, stride 24, 2 floats
+ *   color: rgba_t  @ offset 20, stride 24, 4 unsigned bytes normalized
+ *
+ * Per-VAO state stored: the attribute indices assigned by glGetAttribLocation
+ * at shader init time, recorded via our glEnableVertexAttribArray intercept.
+ * On glBindVertexArray, we re-call glEnableVertexAttribArray +
+ * glVertexAttribPointer with those stored indices and the known vertex_t layout.
+ *
+ * Max 4 VAOs (game + post_default + post_crt + 1 spare).
+ * Max 4 attrib slots per VAO (game uses 3, post uses 2).
+ *
+ * Storage defined once in platform_switch.c (RENDER_GL_FUNC_IMPL TU).
+ * ---------------------------------------------------------------------- */
+
+#define _SW_VAO_MAX    4
+#define _SW_ATTR_MAX   4
+
+typedef struct {
+    GLuint indices[_SW_ATTR_MAX];  /* attribute indices from glGetAttribLocation */
+    int    count;                  /* number of active attributes */
+} _sw_vao_t;
+
+#ifdef RENDER_GL_FUNC_IMPL
+_sw_vao_t _sw_vaos[_SW_VAO_MAX + 1];  /* slot 0 unused */
+GLuint    _sw_vao_next  = 1;
+GLuint    _sw_vao_bound = 0;
+#else
+extern _sw_vao_t _sw_vaos[_SW_VAO_MAX + 1];
+extern GLuint    _sw_vao_next;
+extern GLuint    _sw_vao_bound;
+#endif
+
+/* vertex_t offsets — must match types.h exactly */
+#define _SW_OFFSET_POS   0
+#define _SW_OFFSET_UV    12
+#define _SW_OFFSET_COLOR 20
+#define _SW_STRIDE       24
+
+/* Replay the vertex_t attribute layout for the given VAO.
+ * Called by glBindVertexArray after setting _sw_vao_bound.
+ * The VBO is already bound by render_flush before drawing. */
+static inline void _sw_replay_attribs(GLuint id) {
+    if (id == 0 || id > _SW_VAO_MAX) return;
+    _sw_vao_t *v = &_sw_vaos[id];
+    for (int i = 0; i < v->count; i++) {
+        GLuint idx = v->indices[i];
+        glEnableVertexAttribArray(idx);
+        if (i == 0) {
+            /* pos: 3 floats */
+            glVertexAttribPointer(idx, 3, GL_FLOAT, GL_FALSE,
+                                  _SW_STRIDE, (const void *)_SW_OFFSET_POS);
+        } else if (i == 1) {
+            /* uv: 2 floats */
+            glVertexAttribPointer(idx, 2, GL_FLOAT, GL_FALSE,
+                                  _SW_STRIDE, (const void *)_SW_OFFSET_UV);
+        } else {
+            /* color: 4 unsigned bytes, normalized */
+            glVertexAttribPointer(idx, 4, GL_UNSIGNED_BYTE, GL_TRUE,
+                                  _SW_STRIDE, (const void *)_SW_OFFSET_COLOR);
+        }
+    }
 }
 
-#define glGenVertexArraysAPPLE(n, arrays)    glGenVertexArraysOES(n, arrays)
-#define glBindVertexArrayAPPLE(id)           glBindVertexArrayOES(id)
-#define glDeleteVertexArraysAPPLE(n, arrays) glDeleteVertexArraysOES(n, arrays)
+static inline void glGenVertexArrays(GLsizei n, GLuint *arrays) {
+    for (GLsizei i = 0; i < n; i++)
+        arrays[i] = (_sw_vao_next <= _SW_VAO_MAX) ? _sw_vao_next++ : 0;
+}
+
+static inline void glBindVertexArray(GLuint id) {
+    _sw_vao_bound = id;
+    _sw_replay_attribs(id);
+}
+
+static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
+    for (GLsizei i = 0; i < n; i++) {
+        GLuint id = arrays[i];
+        if (id >= 1 && id <= _SW_VAO_MAX)
+            _sw_vaos[id] = (_sw_vao_t){0};
+    }
+}
+
+/* Record attribute index into the currently bound VAO.
+ * render_gl.c calls glEnableVertexAttribArray then glVertexAttribPointer
+ * during shader init — we only need the index; layout is known statically. */
+static inline void _sw_glEnableVertexAttribArray(GLuint index) {
+    glEnableVertexAttribArray(index);  /* real call — macro not yet defined */
+    if (_sw_vao_bound >= 1 && _sw_vao_bound <= _SW_VAO_MAX) {
+        _sw_vao_t *v = &_sw_vaos[_sw_vao_bound];
+        if (v->count < _SW_ATTR_MAX)
+            v->indices[v->count++] = index;
+    }
+}
+
+#define glEnableVertexAttribArray(index)  _sw_glEnableVertexAttribArray(index)
+
 
 /* Debug callbacks — not available in GLES2 */
 #define glDebugMessageCallback(cb, userp)              ((void)(cb))
@@ -68,7 +153,6 @@ static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
 #  define GLvoid void
 #endif
 
-/* GL_TRUE/GL_FALSE may not be defined by all GLES2 headers */
 #ifndef GL_TRUE
 #  define GL_TRUE  1
 #endif
@@ -105,8 +189,7 @@ static inline void glPolygonMode(unsigned int face, unsigned int mode) {
     (void)face; (void)mode;
 }
 
-/* mesa-switch requires GL_RGBA for FBO color attachments.
- * GL_RGB is not color-renderable in GLES2. */
+/* mesa-switch requires GL_RGBA for FBO color attachments */
 #ifdef GL_RGB
 #undef GL_RGB
 #define GL_RGB GL_RGBA
@@ -116,15 +199,9 @@ static inline void glPolygonMode(unsigned int face, unsigned int mode) {
 #define glGenerateMipmap(target) ((void)(target))
 
 /* Anisotropic filtering — not in core GLES2.
- *
- * render_gl.c makes exactly two anisotropy calls (confirmed by source audit):
- *   glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &anisotropy) → GL_INVALID_VALUE
- *   glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
- *
- * glTexParameterf is the only glTexParameterf call in the codebase — no-op it.
- * glGetFloatv wrapper suppresses the invalid enum, passes everything else through.
- *
- * IMPORTANT: wrapper defined BEFORE the macro so the body sees the real symbol. */
+ * glGetFloatv wrapper suppresses the invalid enum query.
+ * glTexParameterf is no-opped — only called once in codebase for anisotropy.
+ * Wrapper defined BEFORE macro to avoid recursive expansion. */
 static inline void _switch_glGetFloatv(GLenum pname, GLfloat *params) {
     if (pname == GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT) {
         if (params) *params = 1.0f;
@@ -147,8 +224,8 @@ static inline void glGetTexImage(unsigned int target, int level,
 
 #ifdef RENDER_GL_FUNC_IMPL
 static inline int render_init_gl_funcs(void) {
-    return 0; /* GL functions resolved via static libGLESv2 link */
+    return 0;
 }
-#endif /* RENDER_GL_FUNC_IMPL */
+#endif
 
 #endif /* PLATFORM_SWITCH */
