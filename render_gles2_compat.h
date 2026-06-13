@@ -114,21 +114,30 @@ static inline void glPolygonMode(unsigned int face, unsigned int mode) {
  * in mesa-switch, which crashes on firmware 19.0.1 with mesa 20.1.0. */
 #define glGenerateMipmap(target) ((void)(target))
 
-/* Anisotropic filtering extension — not in core GLES2.
- * glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT) with an undefined enum
- * generates GL_INVALID_VALUE and leaves anisotropy=0. Then
- * glTexParameterf(..., GL_TEXTURE_MAX_ANISOTROPY_EXT, 0.0) is invalid
- * (minimum is 1.0) and corrupts the atlas texture sampler state,
- * causing all texture lookups to return black.
- * No-op the anisotropy parameter on Switch by wrapping glTexParameterf.
+/* Anisotropic filtering — not in core GLES2.
  *
- * IMPORTANT: define the wrapper BEFORE defining the macro so that the
- * wrapper body calls the real libGLESv2 glTexParameterf symbol, not itself. */
-static inline void _switch_glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
-    if (pname == GL_TEXTURE_MAX_ANISOTROPY_EXT) return;
-    glTexParameterf(target, pname, param);  /* real symbol — macro not yet defined */
+ * render_gl.c does exactly two anisotropy calls (confirmed by source audit):
+ *   glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &anisotropy)  → GL_INVALID_VALUE on Switch
+ *   glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
+ *
+ * glTexParameterf is the only glTexParameterf call in the entire codebase —
+ * all other texture param calls use glTexParameteri. So we eliminate it entirely
+ * with a simple no-op macro.
+ *
+ * glGetFloatv needs a wrapper to suppress the GL_INVALID_VALUE from the
+ * anisotropy query while passing all other glGetFloatv calls through.
+ *
+ * IMPORTANT: wrapper defined BEFORE the macro so the function body sees
+ * the real libGLESv2 glGetFloatv symbol — avoids infinite recursive expansion. */
+static inline void _switch_glGetFloatv(GLenum pname, GLfloat *params) {
+    if (pname == GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT) {
+        if (params) *params = 1.0f;
+        return;
+    }
+    glGetFloatv(pname, params);  /* real symbol — macro not yet defined */
 }
-#define glTexParameterf _switch_glTexParameterf
+#define glGetFloatv _switch_glGetFloatv
+#define glTexParameterf(target, pname, param) ((void)(target))
 
 /* glGetTexImage is desktop GL only */
 static inline void glGetTexImage(unsigned int target, int level,
