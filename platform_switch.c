@@ -559,7 +559,7 @@ bool __wrap_file_exists(const char *path) {
     if (path[0] == 's' || path[0] == '/') {
         snprintf(full, sizeof(full), "%s", path);
     } else {
-        snprintf(full, sizeof(full), ASSETS_PATH "/%s", path);
+        snprintf(full, sizeof(full), "sdmc:/%s", path);
     }
     struct stat st;
     bool result = (stat(full, &st) == 0);
