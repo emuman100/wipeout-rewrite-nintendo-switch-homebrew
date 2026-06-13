@@ -39,11 +39,25 @@ static inline unsigned int glewInit(void) { return 0; }
  * crashes were caused by the eglGetProcAddress dispatch stub path, which
  * is now avoided by linking libGLESv2 statically. Real VAO functions work.
  *
- * render_gl.c references glGenVertexArraysAPPLE/glBindVertexArrayAPPLE on
- * the Apple path — redirect those to the real OES functions on Switch. */
-#define glGenVertexArraysAPPLE(n, arrays)    glGenVertexArrays(n, arrays)
-#define glBindVertexArrayAPPLE(id)           glBindVertexArray(id)
-#define glDeleteVertexArraysAPPLE(n, arrays) glDeleteVertexArrays(n, arrays)
+ * The core names (glGenVertexArrays, glBindVertexArray) are not declared
+ * in <GLES2/gl2.h> — they are OES extensions. Declare them here as inline
+ * wrappers around the OES symbols which ARE present in static libGLESv2.
+ *
+ * render_gl.c also references glGenVertexArraysAPPLE/glBindVertexArrayAPPLE
+ * on the Apple path — redirect those to the OES functions too. */
+static inline void glGenVertexArrays(GLsizei n, GLuint *arrays) {
+    glGenVertexArraysOES(n, arrays);
+}
+static inline void glBindVertexArray(GLuint array) {
+    glBindVertexArrayOES(array);
+}
+static inline void glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
+    glDeleteVertexArraysOES(n, arrays);
+}
+
+#define glGenVertexArraysAPPLE(n, arrays)    glGenVertexArraysOES(n, arrays)
+#define glBindVertexArrayAPPLE(id)           glBindVertexArrayOES(id)
+#define glDeleteVertexArraysAPPLE(n, arrays) glDeleteVertexArraysOES(n, arrays)
 
 /* Debug callbacks — not available in GLES2 */
 #define glDebugMessageCallback(cb, userp)              ((void)(cb))
