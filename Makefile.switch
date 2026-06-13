@@ -8,8 +8,7 @@
 # Prerequisites:
 #   devkitPro devkitA64 toolchain  (https://devkitpro.org/wiki/Getting_Started)
 #   dkp-pacman packages:
-#     switch-dev switch-sdl2
-#     switch-mesa switch-libdrm_nouveau  (GLES2 driver, pulled in by switch-sdl2)
+#     switch-dev switch-mesa switch-libdrm_nouveau
 #
 # Usage:
 #   export DEVKITPRO=/opt/devkitpro   # or wherever you installed it
@@ -40,11 +39,10 @@ CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections \
             $(ARCH) $(INCLUDE) -D__SWITCH__ -DPLATFORM_SWITCH=1 \
             -DRENDERER_GLES2=1 \
             -DUSE_GLES2=1 \
-            -std=gnu11
+            -std=gnu11 \
+            -include $(CURDIR)/src/render_gles2_compat.h
 
-CFLAGS   += $(shell $(DEVKITPRO)/portlibs/switch/bin/sdl2-config --cflags 2>/dev/null)
-# Force-include the GLES2 compat header into every TU (same as CMake's -include flag)
-CFLAGS   += -include $(CURDIR)/src/render_gles2_compat.h
+CFLAGS   += $(shell pkg-config --cflags libdrm 2>/dev/null)
 
 LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) \
             -Wl,-Map,$(BUILD)/$(TARGET).map \
@@ -52,12 +50,11 @@ LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) \
 
 #---------------------------------------------------------------------------------
 # Libraries
-# SDL2 owns window + GL context creation; libnx handles audio/input/fs.
-# SDL2 on Switch links EGL + mesa + drm_nouveau transitively — no need to
-# list them explicitly.  nx must come after SDL2 in the link order.
+# libGLESv2 is NOT linked — GL functions are resolved dynamically via
+# eglGetProcAddress after eglMakeCurrent (see render_gles2_compat.h).
+# This matches ppsspp (m4xw) and gzdoom (fgsfdsfgs) Switch ports.
 #---------------------------------------------------------------------------------
-LIBS     := $(shell $(DEVKITPRO)/portlibs/switch/bin/sdl2-config --libs 2>/dev/null) \
-            -lGLESv2 -lnx -lm
+LIBS     := -lEGL -lglapi -ldrm_nouveau -lnx -lm
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX)
 
@@ -92,7 +89,7 @@ CFILES := \
     src/system.c                  \
     src/mem.c                     \
     src/input.c                   \
-    src/render/render_gl.c
+    src/render_gl.c
 
 OFILES   := $(addprefix $(BUILD)/, $(CFILES:.c=.o))
 DFILES   := $(OFILES:.o=.d)

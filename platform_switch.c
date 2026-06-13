@@ -1,4 +1,12 @@
 /*
+ * Define RENDER_GL_FUNC_IMPL before the force-included render_gles2_compat.h
+ * is processed. This causes the GL function pointer variables to be *defined*
+ * (not just declared extern) in this translation unit, and makes
+ * render_init_gl_funcs() available for calling after eglMakeCurrent.
+ */
+#define RENDER_GL_FUNC_IMPL
+
+/*
  * platform_switch.c
  * Nintendo Switch platform backend for wipeout-rewrite
  *
@@ -8,9 +16,9 @@
  * Build requirements:
  *   devkitPro devkitA64 r19+
  *   libnx 4.x
- *   switch-sdl2  (for video / GL context creation only)
- *   switch-mesa / switch-libdrm (GLES2 driver, loaded by SDL2's EGL backend)
- *   deko3d is NOT used; we rely on OpenGL ES 2 via SDL2 + EGL (mesa-switch)
+ *   switch-mesa / switch-libdrm (for EGL + OpenGL ES 2)
+ *   switch-sdl2  (optional – see AUDIO section; audren path used by default)
+ *   deko3d is NOT used; we rely on OpenGL ES 2 via EGL (mesa-switch)
  *
  * The wipeout-rewrite CMake flag to pair with this file:
  *   -DPLATFORM=SWITCH -DRENDERER=GLES2
@@ -37,17 +45,30 @@
 #include <time.h>
 #include <malloc.h>  /* memalign */
 
-/* Debug tracing — define as printf for nxlink debugging, no-op for release */
+/* Debug logging — writes to sdmc:/switch/wipegame/debug.log */
+static FILE *s_log = NULL;
+
+static void log_open(void) {
+    s_log = fopen("sdmc:/switch/wipegame/debug.log", "w");
+}
+
+static void log_close(void) {
+    if (s_log) { fflush(s_log); fclose(s_log); s_log = NULL; }
+}
+
 #ifndef TRACE
-#  define TRACE(fmt, ...) ((void)0)
+#  define TRACE(fmt, ...) do { \
+        if (s_log) { fprintf(s_log, fmt "\n", ##__VA_ARGS__); fflush(s_log); } \
+    } while(0)
 #endif
 
 /* devkitPro / libnx */
 #include <switch.h>
 
-/* SDL2 — used exclusively for window creation and GL context management.
- * Audio, input, and filesystem continue to use libnx APIs directly. */
-#include <SDL2/SDL.h>
+/* EGL + GLES2 via mesa-switch */
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
 
 /* wipeout-rewrite internal headers (paths relative to project src/) */
 #include "platform.h"
@@ -72,9 +93,11 @@
  */
 u32 __nx_applet_type = AppletType_SystemApplication;
 
-/* SDL2 video state */
-static SDL_Window   *s_sdl_window  = NULL;
-static SDL_GLContext s_sdl_glctx   = NULL;
+static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
+static EGLContext s_egl_context = EGL_NO_CONTEXT;
+static EGLSurface s_egl_surface = EGL_NO_SURFACE;
+
+static NWindow *s_nwindow = NULL;
 
 static bool s_wants_exit = false;
 
@@ -85,6 +108,8 @@ static u32 s_audio_buffer_size = 0;
 static u32 s_audio_sample_rate = 0;    /* cached at audio_init() */
 static u32 s_audio_channel_count = 0;  /* cached at audio_init() */
 static void (*s_audio_mix_cb)(float *buffer, uint32_t len) = NULL;
+static bool s_audio_ok = false;   /* true only if audio_init() succeeded */
+static float *s_float_buf = NULL; /* pre-allocated resample buffer (avoids per-frame malloc) */
 
 /* Controller – initialised once in main(), updated each frame */
 static PadState s_pad;
@@ -100,68 +125,112 @@ static PadState s_pad;
 #define AUDIO_BUFFER_FRAMES 2
 
 /* -------------------------------------------------------------------------
- * SDL2 video / GL context initialisation
- *
- * SDL2 is used exclusively for window creation and GLES2 context management.
- * Everything else (audio, input, filesystem) continues to use libnx directly.
+ * EGL / OpenGL ES 2 initialisation
  * ---------------------------------------------------------------------- */
 
-static bool sdl_video_init(void) {
-    /* Initialise only the video subsystem — audio is handled by libnx audout */
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        TRACE("platform_switch: SDL_Init(VIDEO) failed: %s", SDL_GetError());
+static bool egl_init(void) {
+    /* Grab the default NWindow (framebuffer window) */
+    s_nwindow = nwindowGetDefault();
+    if (!s_nwindow) {
+        TRACE("egl_init: nwindowGetDefault failed");
         return false;
     }
+    TRACE("egl_init: nwindow OK");
 
-    /* Request OpenGL ES 2 context */
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    nwindowSetDimensions(s_nwindow, SWITCH_SCREEN_W, SWITCH_SCREEN_H);
 
-    /* 8-bit colour channels + 24-bit depth — matches former EGL config */
-    SDL_GL_SetAttribute(SDL_GL_RED_SIZE,   8);
-    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,  8);
-    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
-    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-
-    s_sdl_window = SDL_CreateWindow(
-        "wipEout Rewrite",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        SWITCH_SCREEN_W, SWITCH_SCREEN_H,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN
-    );
-    if (!s_sdl_window) {
-        TRACE("platform_switch: SDL_CreateWindow failed: %s", SDL_GetError());
-        SDL_Quit();
+    s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (s_egl_display == EGL_NO_DISPLAY) {
+        TRACE("egl_init: eglGetDisplay failed");
         return false;
     }
+    TRACE("egl_init: eglGetDisplay OK");
 
-    s_sdl_glctx = SDL_GL_CreateContext(s_sdl_window);
-    if (!s_sdl_glctx) {
-        TRACE("platform_switch: SDL_GL_CreateContext failed: %s", SDL_GetError());
-        SDL_DestroyWindow(s_sdl_window);
-        s_sdl_window = NULL;
-        SDL_Quit();
+    EGLint major, minor;
+    if (!eglInitialize(s_egl_display, &major, &minor)) {
+        TRACE("egl_init: eglInitialize failed");
         return false;
     }
+    TRACE("egl_init: eglInitialize OK (%d.%d)", major, minor);
 
-    /* Disable vsync — the game manages its own frame timing */
-    SDL_GL_SetSwapInterval(0);
+    /* Request OpenGL ES 2 */
+    eglBindAPI(EGL_OPENGL_ES_API);
+
+    static const EGLint config_attribs[] = {
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
+        EGL_RED_SIZE,        8,
+        EGL_GREEN_SIZE,      8,
+        EGL_BLUE_SIZE,       8,
+        EGL_ALPHA_SIZE,      0,   /* ppsspp uses 0 alpha for GLES2 */
+        EGL_DEPTH_SIZE,      16,  /* ppsspp uses 16, not 24 */
+        EGL_STENCIL_SIZE,    8,   /* ppsspp requests stencil */
+        EGL_NONE
+    };
+
+    EGLConfig config;
+    EGLint num_configs;
+    if (!eglChooseConfig(s_egl_display, config_attribs, &config, 1, &num_configs) || num_configs == 0) {
+        TRACE("egl_init: eglChooseConfig failed");
+        return false;
+    }
+    TRACE("egl_init: eglChooseConfig OK");
+
+    s_egl_surface = eglCreateWindowSurface(s_egl_display, config,
+                                           (EGLNativeWindowType)s_nwindow, NULL);
+    if (s_egl_surface == EGL_NO_SURFACE) {
+        TRACE("egl_init: eglCreateWindowSurface failed (0x%x)", eglGetError());
+        return false;
+    }
+    TRACE("egl_init: eglCreateWindowSurface OK");
+
+    static const EGLint ctx_attribs[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_NONE
+    };
+    s_egl_context = eglCreateContext(s_egl_display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (s_egl_context == EGL_NO_CONTEXT) {
+        TRACE("egl_init: eglCreateContext failed");
+        return false;
+    }
+    TRACE("egl_init: eglCreateContext OK");
+
+    if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
+        TRACE("egl_init: eglMakeCurrent failed");
+        return false;
+    }
+    TRACE("egl_init: eglMakeCurrent OK");
+
+    /* Resolve all GL function pointers dynamically via eglGetProcAddress.
+     * Both ppsspp (m4xw) and gzdoom (fgsfdsfgs) Switch ports do this — the
+     * static libGLESv2 symbols point into an uninitialised mesa dispatch table
+     * and cause crashes deep in mesa internals without this step. */
+    int gl_failed = render_init_gl_funcs();
+    if (gl_failed > 0) {
+        TRACE("egl_init: WARNING — %d GL functions failed to resolve", gl_failed);
+    } else {
+        TRACE("egl_init: all GL functions resolved OK");
+    }
+
+    /* Disable vsync so the game can manage its own timing */
+    eglSwapInterval(s_egl_display, 0);
+    TRACE("egl_init: done");
 
     return true;
 }
 
-static void sdl_video_cleanup(void) {
-    if (s_sdl_glctx) {
-        SDL_GL_DeleteContext(s_sdl_glctx);
-        s_sdl_glctx = NULL;
+static void egl_cleanup(void) {
+    if (s_egl_display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (s_egl_context != EGL_NO_CONTEXT)
+            eglDestroyContext(s_egl_display, s_egl_context);
+        if (s_egl_surface != EGL_NO_SURFACE)
+            eglDestroySurface(s_egl_display, s_egl_surface);
+        eglTerminate(s_egl_display);
     }
-    if (s_sdl_window) {
-        SDL_DestroyWindow(s_sdl_window);
-        s_sdl_window = NULL;
-    }
-    SDL_Quit();
+    s_egl_display = EGL_NO_DISPLAY;
+    s_egl_context = EGL_NO_CONTEXT;
+    s_egl_surface = EGL_NO_SURFACE;
 }
 
 /* -------------------------------------------------------------------------
@@ -188,6 +257,18 @@ static bool audio_init(void) {
      */
     s_audio_buffer_size = (s_audio_sample_rate / 30) * s_audio_channel_count * sizeof(s16);
     s_audio_buffer_size = (s_audio_buffer_size + 0xFFF) & ~0xFFF;
+
+    /* Pre-allocate the float conversion buffer once (avoids per-frame malloc).
+     * Sized for the maximum number of source samples we will ever request:
+     * hw_samples * (44100/48000) + 2 guard samples. */
+    u32 max_hw_samples = s_audio_buffer_size / (s_audio_channel_count * sizeof(s16));
+    u32 max_src_samples = (u32)((double)max_hw_samples * 44100.0 / s_audio_sample_rate) + 2;
+    s_float_buf = (float *)malloc(max_src_samples * s_audio_channel_count * sizeof(float));
+    if (!s_float_buf) {
+        TRACE("platform_switch: float_buf alloc failed");
+        audoutExit();
+        return false;
+    }
 
     for (int i = 0; i < AUDIO_BUFFER_FRAMES; i++) {
         s_audio_data[i] = (u8 *)memalign(0x1000, s_audio_buffer_size);
@@ -225,10 +306,12 @@ static bool audio_init(void) {
     audoutAppendAudioOutBuffer(&s_audio_buffers[0]);
     audoutAppendAudioOutBuffer(&s_audio_buffers[1]);
 
+    s_audio_ok = true;
     return true;
 }
 
 static void audio_cleanup(void) {
+    if (!s_audio_ok) return;
     audoutStopAudioOut();
     audoutExit();
     for (int i = 0; i < AUDIO_BUFFER_FRAMES; i++) {
@@ -237,6 +320,11 @@ static void audio_cleanup(void) {
             s_audio_data[i] = NULL;
         }
     }
+    if (s_float_buf) {
+        free(s_float_buf);
+        s_float_buf = NULL;
+    }
+    s_audio_ok = false;
 }
 
 /*
@@ -245,7 +333,7 @@ static void audio_cleanup(void) {
  * then re-queues it.
  */
 static void audio_update(void) {
-    if (!s_audio_mix_cb) return;
+    if (!s_audio_ok || !s_audio_mix_cb) return;
 
     AudioOutBuffer *released = NULL;
     u32 released_count = 0;
@@ -265,13 +353,12 @@ static void audio_update(void) {
     /*
      * We ask the game engine for 44100 Hz float stereo, then convert/resample
      * to the HW rate (48000 Hz) s16le.
+     * s_float_buf is pre-allocated in audio_init — no per-frame malloc.
      */
     u32 src_samples = (u32)((double)hw_num_samples * 44100.0 / s_audio_sample_rate) + 2;
-    float *float_buf = (float *)malloc(src_samples * s_audio_channel_count * sizeof(float));
-    if (!float_buf) return;
 
-    memset(float_buf, 0, src_samples * s_audio_channel_count * sizeof(float));
-    s_audio_mix_cb(float_buf, src_samples);
+    memset(s_float_buf, 0, src_samples * s_audio_channel_count * sizeof(float));
+    s_audio_mix_cb(s_float_buf, src_samples);
 
     /* Convert float PCM → s16 with simple linear resampling */
     s16 *out = (s16 *)released->buffer;
@@ -282,16 +369,14 @@ static void audio_update(void) {
         if (src_i + 1 >= src_samples) src_i = src_samples - 2;
 
         for (u32 ch = 0; ch < s_audio_channel_count; ch++) {
-            float s0 = float_buf[src_i * s_audio_channel_count + ch];
-            float s1 = float_buf[(src_i + 1) * s_audio_channel_count + ch];
+            float s0 = s_float_buf[src_i * s_audio_channel_count + ch];
+            float s1 = s_float_buf[(src_i + 1) * s_audio_channel_count + ch];
             float s  = s0 + (s1 - s0) * frac;
             if      (s >  1.0f) s =  1.0f;
             else if (s < -1.0f) s = -1.0f;
             out[i * s_audio_channel_count + ch] = (s16)(s * 32767.0f);
         }
     }
-
-    free(float_buf);
 
     released->data_size = hw_num_samples * s_audio_channel_count * sizeof(s16);
     audoutAppendAudioOutBuffer(released);
@@ -318,6 +403,7 @@ static void input_update(void) {
     u64 pressed = padGetButtonsDown(&s_pad);
     u64 released_buttons = padGetButtonsUp(&s_pad);
     HidAnalogStickState ls = padGetStickPos(&s_pad, 0);
+    HidAnalogStickState rs = padGetStickPos(&s_pad, 1);
 
     /* ---- Digital buttons — passed as float 0.0/1.0 per input_set_button_state contract ---- */
 
@@ -348,6 +434,10 @@ static void input_update(void) {
     input_set_button_state(INPUT_GAMEPAD_X,       (held & HidNpadButton_X)     ? 1.0f : 0.0f);
     input_set_button_state(INPUT_GAMEPAD_Y,       (held & HidNpadButton_Y)     ? 1.0f : 0.0f);
 
+    /* Stick click buttons */
+    input_set_button_state(INPUT_GAMEPAD_L_STICK_PRESS, (held & HidNpadButton_StickL) ? 1.0f : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_R_STICK_PRESS, (held & HidNpadButton_StickR) ? 1.0f : 0.0f);
+
     /* ---- Analog stick → axis values ---- */
 
     /* Left stick X → steering (range -1..1) */
@@ -363,6 +453,15 @@ static void input_update(void) {
      */
     input_set_button_state(INPUT_GAMEPAD_L_STICK_UP,    axis_y > 0 ?  axis_y : 0.0f);
     input_set_button_state(INPUT_GAMEPAD_L_STICK_DOWN,  axis_y < 0 ? -axis_y : 0.0f);
+
+    /* Right stick → camera look (same Y-axis convention as left stick) */
+    float raxis_x = (float)rs.x / 32767.0f;
+    float raxis_y = (float)rs.y / 32767.0f;
+
+    input_set_button_state(INPUT_GAMEPAD_R_STICK_LEFT,  raxis_x < 0 ? -raxis_x : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_R_STICK_RIGHT, raxis_x > 0 ?  raxis_x : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_R_STICK_UP,    raxis_y > 0 ?  raxis_y : 0.0f);
+    input_set_button_state(INPUT_GAMEPAD_R_STICK_DOWN,  raxis_y < 0 ? -raxis_y : 0.0f);
 
     /* Exit when Home is held for 5 seconds – or just Plus in menus via the game */
     (void)pressed;
@@ -408,7 +507,7 @@ void platform_video_init(void) {
 }
 
 void platform_video_cleanup(void) {
-    sdl_video_cleanup();
+    egl_cleanup();
 }
 
 void platform_prepare_frame(void) {
@@ -417,7 +516,7 @@ void platform_prepare_frame(void) {
 
 void platform_end_frame(void) {
     /* Present the rendered frame */
-    SDL_GL_SwapWindow(s_sdl_window);
+    eglSwapBuffers(s_egl_display, s_egl_surface);
 
     /* Push audio for this frame */
     audio_update();
@@ -560,27 +659,41 @@ int main(int argc, char *argv[]) {
     /* Create sdmc:/switch/wipegame/userdata/ if it doesn't exist yet */
     userdata_dir_init();
 
-    /* ---- SDL2 video + GLES2 context ---- */
-    if (!sdl_video_init()) {
-        TRACE("platform_switch: SDL2 video init failed – aborting");
+    /* Open debug log — directory guaranteed to exist after userdata_dir_init */
+    log_open();
+    TRACE("wipegame starting");
+
+    /* ---- EGL + GLES2 ---- */
+    TRACE("egl_init: starting");
+    if (!egl_init()) {
+        TRACE("egl_init: FAILED");
+        log_close();
         if (exit_locked) appletUnlockExit();
         return 1;
     }
+    TRACE("egl_init: OK");
 
     /* ---- Audio ---- */
+    TRACE("audio_init: starting");
     if (!audio_init()) {
-        TRACE("platform_switch: audio init failed – continuing without audio");
+        TRACE("audio_init: failed – continuing without audio");
+    } else {
+        TRACE("audio_init: OK");
     }
 
     /* ---- Controller ---- */
-    /* Enable all controller styles; initialise the pad state once here */
+    TRACE("pad init: starting");
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&s_pad);
+    TRACE("pad init: OK");
 
     /* ---- Game init ---- */
+    TRACE("system_init: starting");
     system_init();
+    TRACE("system_init: OK");
 
     /* ---- Main loop — mirrors DC port exactly ---- */
+    TRACE("entering main loop");
     while (!s_wants_exit) {
         platform_pump_events();
         if (s_wants_exit) break;   /* appletMainLoop() signalled exit; don't run another frame */
@@ -588,12 +701,16 @@ int main(int argc, char *argv[]) {
         system_update();   /* owns timing, render_frame_prepare/end, game_update, input_clear */
         platform_end_frame();
     }
+    TRACE("main loop exited");
 
     /* ---- Cleanup ---- */
     /* system_cleanup() calls render_cleanup() and input_cleanup(). */
+    TRACE("cleanup: starting");
     system_cleanup();
     platform_video_cleanup();
     audio_cleanup();
+    TRACE("cleanup: done");
+    log_close();
 
     /*
      * Release the exit lock. If the OS requested exit (Home button) while

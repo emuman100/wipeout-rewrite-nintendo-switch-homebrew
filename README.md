@@ -14,10 +14,8 @@ A Nintendo Switch NRO port of [phoboslab/wipeout-rewrite](https://github.com/pho
 - The following devkitPro packages:
 
 ```bash
-dkp-pacman -S switch-dev switch-sdl2
+dkp-pacman -S switch-dev switch-mesa switch-libdrm_nouveau
 ```
-
-(`switch-sdl2` pulls in `switch-mesa` and `switch-libdrm_nouveau` as dependencies.)
 
 - CMake ≥ 3.13, or GNU make
 
@@ -175,11 +173,16 @@ original WipEout logo icon — and launch it.
 | Switch Button | Action |
 |---|---|
 | **A** | Thrust (accelerate) |
+| **B** | Brake |
 | **X** | Fire weapon |
 | **Y** | Change camera view |
+| **ZR** | Fire weapon (trigger) |
+| **ZL** | Absorb pick-up (trigger) |
 | **L** | Left airbrake |
 | **R** | Right airbrake |
 | **D-Pad** | Steer / pitch nose up-down |
+| **Left stick** | Steer / navigate menus |
+| **Right stick** | Camera look |
 | **+** (Plus) | Pause |
 
 ### Menus
@@ -194,15 +197,10 @@ original WipEout logo icon — and launch it.
 
 ### Notes
 
-- **ZR and ZL are not mapped.** The game has no trigger actions (shield and
-  absorb are passive power-up effects, not player-triggered). ZR/ZL can be
-  remapped to any action via the in-game Options → Controls menu.
-- **Analog steering** requires remapping in Options → Controls. By default
-  the left stick navigates menus only; D-Pad steers during races. This
-  matches the upstream SDL behaviour — the analog response curve code is
-  present and works once A_LEFT/A_RIGHT are rebound to the stick.
-- **Unpausing**: press **+** to open the pause menu, navigate to **CONTINUE**,
-  press **A**.
+- **ZR and ZL** are mapped to fire weapon and absorb respectively. They can be rebound to any action via Options → Controls.
+- **Right stick** controls camera look. All four axes and the stick click are reported to the input system and are rebindable in Options → Controls.
+- **Analog steering** works out of the box via the left stick. The left stick also navigates menus.
+- **Unpausing**: press **+** to open the pause menu, navigate to **CONTINUE**, press **A**.
 
 ---
 
@@ -238,7 +236,7 @@ graphics settings, and race progress all persist here across sessions.
 │                                                              │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │  Graphics   │  │    Audio     │  │      Input        │  │
-│  │  SDL2+GLES2 │  │ audout/libnx │  │  padXxx / libnx   │  │
+│  │  EGL+GLES2  │  │ audout/libnx │  │  padXxx / libnx   │  │
 │  │ mesa-switch │  │ 48 kHz s16le │  │ Joy-Con, handheld │  │
 │  │  1280×720   │  │  2 DMA bufs  │  │  Pro Controller   │  │
 │  └─────────────┘  └──────────────┘  └───────────────────┘  │
@@ -259,21 +257,19 @@ graphics settings, and race progress all persist here across sessions.
 
 ### Graphics
 
-**Backend:** OpenGL ES 2.0 via SDL2 (window and GL context creation) and
-mesa-switch (Nouveau driver for Tegra X1). SDL2 is used exclusively for
-video initialisation; audio, input, and filesystem continue to use libnx
-directly. The upstream `render_gl.c` renderer is compiled with
+**Backend:** OpenGL ES 2.0 via EGL and mesa-switch (Nouveau driver for
+Tegra X1). The upstream `render_gl.c` renderer is compiled with
 `-DUSE_GLES2=1`, which enables GLSL `precision highp float;` qualifiers
 and selects `GL_DEPTH_COMPONENT16` for the renderbuffer — both required
 for strict GLES2 compliance.
 
-**Framebuffer:** The SDL2 window is created at **1280×720** with
-`SDL_WINDOW_FULLSCREEN`. In handheld mode this is native. In docked mode
-the Switch hardware compositor upscales to the TV's output resolution
-automatically; no application-side reconfiguration is needed.
+**Framebuffer:** The NWindow is fixed at **1280×720**. In handheld mode
+this is native. In docked mode the Switch hardware compositor upscales
+to the TV's output resolution automatically; no application-side
+reconfiguration is needed.
 
 **Render pipeline:** The game renders to an offscreen FBO (render-to-texture),
-then blits it to the SDL2 window surface via a fullscreen quad. This supports
+then blits it to the EGL surface via a fullscreen quad. This supports
 the three built-in render resolutions (240p, 480p, native 720p) and both
 post-effect modes (none, CRT scanline), all selectable in-game.
 
@@ -282,8 +278,8 @@ textures. The CPU-side packing buffer is allocated from the hunk
 allocator temporarily during load and freed immediately after
 upload — it does not persist at runtime.
 
-**Dock/undock transitions:** SDL2's GL context and the underlying mesa-switch
-EGL surface survive a dock/undock event transparently. The game loop continues
+**Dock/undock transitions:** EGL surfaces and GL contexts survive a
+dock/undock event transparently via mesa-switch. The game loop continues
 uninterrupted across mode changes.
 
 ---
@@ -335,7 +331,9 @@ matching the contract expected by the upstream input layer.
 **Analog stick:** The left stick's Y axis is corrected for the libnx
 convention (positive = up physically) vs the SDL/game convention
 (positive = down), so menu navigation with the stick is correct in
-both axes.
+both axes. The right stick is polled identically and reports all four
+axes plus stick-click to the input layer for camera look and rebinding.
+Both stick-click buttons (L3 / R3) are also reported.
 
 ---
 
@@ -388,11 +386,9 @@ freed before gameplay begins.
 
 | Item | Notes |
 |---|---|
-| **Docked 1080p rendering** | Currently renders at 720p in both modes; hardware upscales when docked. Native 1080p is achievable by polling `appletGetOperationMode()` and calling `SDL_SetWindowSize()` + `system_resize()` per frame. |
+| **Docked 1080p rendering** | Currently renders at 720p in both modes; hardware upscales when docked. Native 1080p is achievable by polling `appletGetOperationMode()` and calling `nwindowSetCrop()` + `system_resize()` per frame. |
 | **Rumble** | libnx exposes `hidSendVibrationValue()`; mapping it to ship collision events in `ship.c` would improve feel. |
 | **Touchscreen** | Not implemented. All input is button-based. |
-| **Analog steering default** | Left stick steers menus only by default. Remap A_LEFT/A_RIGHT to the stick in Options → Controls for analog ship steering. |
-| **ZR / ZL** | Unbound by default; no trigger actions exist in the base game. Remap freely in Options → Controls. |
 
 ---
 
