@@ -68,6 +68,8 @@ static void log_close(void) {
 #include "platform.h"
 #include "input.h"
 #include "system.h"
+#include "render.h"
+#include "wipeout/game.h"
 #include "mem.h"
 
 /*
@@ -668,8 +670,13 @@ int main(int argc, char *argv[]) {
 
     /* ---- Game init ---- */
     TRACE("system_init: starting");
-    system_init();
-    TRACE("system_init: OK");
+    TRACE("system_init: calling platform_now / input_init");
+    input_init();
+    TRACE("system_init: input_init OK");
+    render_init(platform_screen_size());
+    TRACE("system_init: render_init OK");
+    game_init();
+    TRACE("system_init: game_init OK");
 
     /* ---- Main loop — mirrors DC port exactly ---- */
     TRACE("entering main loop");
