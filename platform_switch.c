@@ -68,26 +68,23 @@ static void log_close(void) {
 #include "platform.h"
 #include "input.h"
 #include "system.h"
-#include "render.h"
-#include "wipeout/game.h"
 #include "mem.h"
 
 /*
- * Override the libnx applet type to SystemApplication.
+ * Override the libnx applet type.
  *
- * switch-mesa calls viCreateManagedLayer() during eglInitialize() to create
- * the display layer. This requires AppletResourceUserId which is only
- * available when the applet type is SystemApplication (or LibraryApplet
- * with explicit resource allocation).
+ * mesa-switch calls viCreateManagedLayer() during eglInitialize() which
+ * requires appropriate display layer access rights.
  *
- * Without this override the default type is AppletType_Default which makes
- * viCreateManagedLayer return 2168-0002 (0x4a8), crashing immediately on
- * launch. This is a known requirement for any homebrew NRO using EGL/mesa.
+ * AppletType_SystemApplication works when launched via "hold R" title
+ * override (AppletType_Application context) but conflicts with hbmenu
+ * when launched normally, causing 2168-0002 from the VI service.
  *
- * AppletType_SystemApplication gives full display layer access and works
- * correctly when launched from hbmenu in both normal and "hold R" modes.
+ * AppletType_LibraryApplet is correct for normal hbmenu NRO launches —
+ * hbmenu runs as LibraryApplet and suspends the foreground app, giving
+ * our NRO a valid applet context with display access.
  */
-u32 __nx_applet_type = AppletType_SystemApplication;
+u32 __nx_applet_type = AppletType_LibraryApplet;
 
 static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
 static EGLContext s_egl_context = EGL_NO_CONTEXT;
@@ -670,13 +667,8 @@ int main(int argc, char *argv[]) {
 
     /* ---- Game init ---- */
     TRACE("system_init: starting");
-    TRACE("system_init: calling platform_now / input_init");
-    input_init();
-    TRACE("system_init: input_init OK");
-    render_init(platform_screen_size());
-    TRACE("system_init: render_init OK");
-    game_init();
-    TRACE("system_init: game_init OK");
+    system_init();
+    TRACE("system_init: OK");
 
     /* ---- Main loop — mirrors DC port exactly ---- */
     TRACE("entering main loop");
