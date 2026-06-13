@@ -251,6 +251,7 @@ static bool audio_init(void) {
 
     /* Cache these – they are constant for the lifetime of the app */
     s_audio_sample_rate   = audoutGetSampleRate();    /* 48000 Hz */
+    TRACE("audio_init: sample_rate=%u channels=%u", s_audio_sample_rate, audoutGetChannelCount());
     s_audio_channel_count = audoutGetChannelCount();  /* 2 (stereo) */
 
     /*
@@ -292,6 +293,7 @@ static bool audio_init(void) {
         s_audio_buffers[i].data_offset = 0;
     }
 
+    TRACE("audio_init: buffer_size=%u hw_samples=%u src_samples=%u", s_audio_buffer_size, max_hw_samples, max_src_samples);
     rc = audoutStartAudioOut();
     if (R_FAILED(rc)) {
         TRACE("platform_switch: audoutStartAudioOut failed: 0x%x", rc);

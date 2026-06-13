@@ -114,6 +114,26 @@ static inline void glPolygonMode(unsigned int face, unsigned int mode) {
  * in mesa-switch, which crashes on firmware 19.0.1 with mesa 20.1.0. */
 #define glGenerateMipmap(target) ((void)(target))
 
+/* Anisotropic filtering extension — not in core GLES2.
+ * glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT) with an undefined enum
+ * generates GL_INVALID_VALUE and leaves anisotropy=0. Then
+ * glTexParameterf(..., GL_TEXTURE_MAX_ANISOTROPY_EXT, 0.0) is invalid
+ * (minimum is 1.0) and corrupts the atlas texture sampler state,
+ * causing all texture lookups to return black.
+ * No-op both calls entirely on Switch. */
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+#  define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
+#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
+#  define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
+#endif
+/* Override glTexParameterf to skip anisotropy parameter silently */
+static inline void _switch_glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
+    if (pname == GL_TEXTURE_MAX_ANISOTROPY_EXT) return;
+    glTexParameterf(target, pname, param);
+}
+#define glTexParameterf _switch_glTexParameterf
+
 /* glGetTexImage is desktop GL only */
 static inline void glGetTexImage(unsigned int target, int level,
     unsigned int format, unsigned int type, void *pixels) {
