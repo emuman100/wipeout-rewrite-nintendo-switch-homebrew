@@ -261,8 +261,7 @@ static bool audio_init(void) {
     s_audio_buffer_size = (s_audio_buffer_size + 0xFFF) & ~0xFFF;
 
     /* Pre-allocate the float conversion buffer once (avoids per-frame malloc).
-     * Sized for the maximum number of source samples we will ever request:
-     * hw_samples * (44100/48000) + 2 guard samples. */
+     * Sized for the maximum source samples at 44100 Hz that map to one HW frame. */
     u32 max_hw_samples = s_audio_buffer_size / (s_audio_channel_count * sizeof(s16));
     u32 max_src_samples = (u32)((double)max_hw_samples * 44100.0 / s_audio_sample_rate) + 2;
     s_float_buf = (float *)malloc(max_src_samples * s_audio_channel_count * sizeof(float));
@@ -352,17 +351,15 @@ static void audio_update(void) {
     /* Use cached HW parameters (constant after audio_init) */
     u32 hw_num_samples = s_audio_buffer_size / (s_audio_channel_count * sizeof(s16));
 
-    /*
-     * We ask the game engine for 44100 Hz float stereo, then convert/resample
-     * to the HW rate (48000 Hz) s16le.
-     * s_float_buf is pre-allocated in audio_init — no per-frame malloc.
-     */
+    /* Ask the game mixer for 44100 Hz samples, then resample to 48000 Hz.
+     * The sfx mixer assumes 44100 Hz output — requesting at the wrong rate
+     * would shift pitch of all SFX and music. */
     u32 src_samples = (u32)((double)hw_num_samples * 44100.0 / s_audio_sample_rate) + 2;
 
     memset(s_float_buf, 0, src_samples * s_audio_channel_count * sizeof(float));
     s_audio_mix_cb(s_float_buf, src_samples);
 
-    /* Convert float PCM → s16 with simple linear resampling */
+    /* Resample 44100 → 48000 with linear interpolation, then convert to s16le */
     s16 *out = (s16 *)released->buffer;
     for (u32 i = 0; i < hw_num_samples; i++) {
         double src_pos = (double)i * 44100.0 / s_audio_sample_rate;
