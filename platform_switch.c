@@ -216,6 +216,15 @@ static bool egl_init(void) {
 
     /* Disable vsync so the game can manage its own timing */
     eglSwapInterval(s_egl_display, 0);
+
+    /* Drain any GL errors left over from EGL/mesa initialisation so that
+     * frame 0 glGetError only captures errors from actual game rendering. */
+    { GLenum _e; int _n = 0;
+      while ((_e = glGetError()) != GL_NO_ERROR) {
+          TRACE("egl_init: draining stale GL error 0x%x", _e);
+          if (++_n > 16) break;
+      }
+    }
     TRACE("egl_init: done");
 
     return true;

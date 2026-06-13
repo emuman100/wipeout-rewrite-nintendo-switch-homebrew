@@ -34,27 +34,16 @@
 static unsigned int glewExperimental __attribute__((unused));
 static inline unsigned int glewInit(void) { return 0; }
 
-/* VAOs — glGenVertexArrays/glBindVertexArray crash on Switch firmware 19.0.1
- * with mesa 20.1.0 because mesa's dispatch table setup calls eglGetProcAddress
- * internally which triggers a fatal crash in _mesa_CompressedTextureSubImage3D.
+/* VAOs — GL_OES_vertex_array_object is present in mesa-switch's static
+ * libGLESv2 (confirmed by strings on the linked binary). The earlier VAO
+ * crashes were caused by the eglGetProcAddress dispatch stub path, which
+ * is now avoided by linking libGLESv2 statically. Real VAO functions work.
  *
- * --wrap linker flags only intercept some calls; mesa's internal dispatch
- * routing bypasses them. The only reliable fix is to define these as
- * MACROS so the preprocessor replaces every call site before the compiler
- * or linker can route them to mesa.
- *
- * Safety: both shaders use the same vertex_t layout (pos@0 uv@12 color@20
- * stride=24). Attribute state from shader init persists as global GL state.
- * The post shader ignores the color attribute the game shader enables. */
-#define glGenVertexArrays(n, arrays) \
-    do { GLsizei _i; if (arrays) for (_i = 0; _i < (n); _i++) (arrays)[_i] = 1; } while(0)
-#define glBindVertexArray(id)              ((void)(id))
-#define glDeleteVertexArrays(n, arrays)    ((void)(n))
-
-/* Apple VAO variants — not present on Switch but referenced in render_gl.c */
-#define glGenVertexArraysAPPLE(n, arrays)    ((void)(n))
-#define glBindVertexArrayAPPLE(id)           ((void)(id))
-#define glDeleteVertexArraysAPPLE(n, arrays) ((void)(n))
+ * render_gl.c references glGenVertexArraysAPPLE/glBindVertexArrayAPPLE on
+ * the Apple path — redirect those to the real OES functions on Switch. */
+#define glGenVertexArraysAPPLE(n, arrays)    glGenVertexArrays(n, arrays)
+#define glBindVertexArrayAPPLE(id)           glBindVertexArray(id)
+#define glDeleteVertexArraysAPPLE(n, arrays) glDeleteVertexArrays(n, arrays)
 
 /* Debug callbacks — not available in GLES2 */
 #define glDebugMessageCallback(cb, userp)              ((void)(cb))
@@ -90,7 +79,7 @@ static inline unsigned int glewInit(void) { return 0; }
 #  define GL_LINE 0x1B01
 #endif
 
-/* Anisotropic filtering extension constants. */
+/* Anisotropic filtering extension constants */
 #ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
 #  define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
 #endif
@@ -103,32 +92,25 @@ static inline void glPolygonMode(unsigned int face, unsigned int mode) {
 }
 
 /* mesa-switch requires GL_RGBA for FBO color attachments.
- * GL_RGB is not color-renderable in GLES2, so FBO completeness fails
- * and mesa crashes if GL_RGB is used as internalformat for a render target. */
+ * GL_RGB is not color-renderable in GLES2. */
 #ifdef GL_RGB
 #undef GL_RGB
 #define GL_RGB GL_RGBA
 #endif
 
-/* glGenerateMipmap on a render-target texture triggers the nv50 blitter
- * in mesa-switch, which crashes on firmware 19.0.1 with mesa 20.1.0. */
+/* glGenerateMipmap triggers the nv50 blitter which crashes on Switch */
 #define glGenerateMipmap(target) ((void)(target))
 
 /* Anisotropic filtering — not in core GLES2.
  *
- * render_gl.c does exactly two anisotropy calls (confirmed by source audit):
- *   glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &anisotropy)  → GL_INVALID_VALUE on Switch
+ * render_gl.c makes exactly two anisotropy calls (confirmed by source audit):
+ *   glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &anisotropy) → GL_INVALID_VALUE
  *   glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, anisotropy)
  *
- * glTexParameterf is the only glTexParameterf call in the entire codebase —
- * all other texture param calls use glTexParameteri. So we eliminate it entirely
- * with a simple no-op macro.
+ * glTexParameterf is the only glTexParameterf call in the codebase — no-op it.
+ * glGetFloatv wrapper suppresses the invalid enum, passes everything else through.
  *
- * glGetFloatv needs a wrapper to suppress the GL_INVALID_VALUE from the
- * anisotropy query while passing all other glGetFloatv calls through.
- *
- * IMPORTANT: wrapper defined BEFORE the macro so the function body sees
- * the real libGLESv2 glGetFloatv symbol — avoids infinite recursive expansion. */
+ * IMPORTANT: wrapper defined BEFORE the macro so the body sees the real symbol. */
 static inline void _switch_glGetFloatv(GLenum pname, GLfloat *params) {
     if (pname == GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT) {
         if (params) *params = 1.0f;
@@ -145,17 +127,8 @@ static inline void glGetTexImage(unsigned int target, int level,
     (void)target; (void)level; (void)format; (void)type; (void)pixels;
 }
 
-
 /* -------------------------------------------------------------------------
  * GL function calls — direct static link via libGLESv2
- *
- * ppsspp confirms: on Switch, link libGLESv2 statically and call GL functions
- * directly. eglGetProcAddress returns dispatch table stubs for core GLES2
- * functions that crash on first call because the mesa nouveau driver initializes
- * its shader compiler lazily and the stub path bypasses that init.
- *
- * render_init_gl_funcs() is kept as a no-op for compatibility with the call
- * site in platform_switch.c.
  * ---------------------------------------------------------------------- */
 
 #ifdef RENDER_GL_FUNC_IMPL
