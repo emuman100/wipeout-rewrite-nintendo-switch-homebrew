@@ -475,6 +475,12 @@ static void input_update(void) {
     (void)released_buttons;
 }
 
+/* render_textures_dump uses glGetTexImage which is desktop GL only.
+ * Provide a no-op so the linker is satisfied; it is never called on Switch. */
+void render_textures_dump(const char *path) {
+    (void)path;
+}
+
 /* -------------------------------------------------------------------------
  * Public platform API (matches platform.h contract)
  * ---------------------------------------------------------------------- */
