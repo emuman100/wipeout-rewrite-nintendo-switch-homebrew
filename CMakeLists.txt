@@ -287,22 +287,20 @@ if(SWITCH_PLATFORM)
 	set(NACP_FILE ${CMAKE_BINARY_DIR}/wipegame.nacp)
 	set(NRO_FILE  ${CMAKE_BINARY_DIR}/wipegame.nro)
 
+	set(ICON_FILE ${CMAKE_SOURCE_DIR}/switch/icon.jpg)
+
 	if(NACPTOOL)
 		add_custom_command(TARGET wipeout POST_BUILD
 			COMMAND ${NACPTOOL} --create "wipEout Rewrite" "phoboslab / Switch port" "1.0.0" ${NACP_FILE}
-			COMMENT "Generating NACP..."
+			COMMAND ${ELF2NRO} $<TARGET_FILE:wipeout> ${NRO_FILE} --nacp=${NACP_FILE} --icon=${ICON_FILE}
+			COMMENT "Building NRO with NACP: ${NRO_FILE}"
+		)
+	else()
+		add_custom_command(TARGET wipeout POST_BUILD
+			COMMAND ${ELF2NRO} $<TARGET_FILE:wipeout> ${NRO_FILE} --icon=${ICON_FILE}
+			COMMENT "Building NRO (no NACP): ${NRO_FILE}"
 		)
 	endif()
-
-	set(NRO_EXTRA_ARGS "")
-	if(NACPTOOL AND EXISTS ${NACP_FILE})
-		list(APPEND NRO_EXTRA_ARGS "--nacp=${NACP_FILE}")
-	endif()
-
-	add_custom_command(TARGET wipeout POST_BUILD
-		COMMAND ${ELF2NRO} $<TARGET_FILE:wipeout> ${NRO_FILE} ${NRO_EXTRA_ARGS}
-		COMMENT "Building NRO: ${NRO_FILE}"
-	)
 
 	message(STATUS "Switch NRO will be written to: ${NRO_FILE}")
 endif()
