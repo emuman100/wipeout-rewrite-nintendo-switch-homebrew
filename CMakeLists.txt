@@ -234,6 +234,9 @@ elseif("${PLATFORM}" STREQUAL NULL)
 	target_sources(wipeout PRIVATE src/platform_null.c)
 elseif("${PLATFORM}" STREQUAL SWITCH)
 	target_sources(wipeout PRIVATE src/platform_switch.c)
+	set_source_files_properties(src/platform_switch.c PROPERTIES
+		COMPILE_DEFINITIONS RENDER_GL_FUNC_IMPL
+	)
 endif()
 
 install(TARGETS wipeout)
