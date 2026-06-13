@@ -208,21 +208,11 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: eglMakeCurrent OK");
 
-    /* Resolve all GL function pointers dynamically via eglGetProcAddress.
-     * Both ppsspp (m4xw) and gzdoom (fgsfdsfgs) Switch ports do this — the
-     * static libGLESv2 symbols point into an uninitialised mesa dispatch table
-     * and cause crashes deep in mesa internals without this step. */
-    int gl_failed = render_init_gl_funcs();
-    if (gl_failed > 0) {
-        TRACE("egl_init: WARNING — %d GL functions failed to resolve", gl_failed);
-    } else {
-        TRACE("egl_init: all GL functions resolved OK");
-    }
-    /* Log key shader function pointers to detect non-null but broken stubs */
-    TRACE("egl_init: glCreateShader=%p glCompileShader=%p glCreateProgram=%p",
-        (void*)_gl_glCreateShader, (void*)_gl_glCompileShader, (void*)_gl_glCreateProgram);
-    TRACE("egl_init: glShaderSource=%p glLinkProgram=%p glUseProgram=%p",
-        (void*)_gl_glShaderSource, (void*)_gl_glLinkProgram, (void*)_gl_glUseProgram);
+    /* GL functions are resolved via static libGLESv2 link (confirmed correct
+     * approach by ppsspp Switch port). render_init_gl_funcs() is a no-op. */
+    render_init_gl_funcs();
+    TRACE("egl_init: GL via static libGLESv2 link OK");
+
 
     /* Disable vsync so the game can manage its own timing */
     eglSwapInterval(s_egl_display, 0);
@@ -559,6 +549,24 @@ static void userdata_dir_init(void) {
     /* mkdir silently succeeds if the directory already exists */
     mkdir("sdmc:/switch/wipegame", 0777);
     mkdir(USERDATA_PATH, 0777);
+}
+
+/* file_exists() in utils.c uses a bare relative path which doesn't work on
+ * Switch — stat("wipeout/track01/") never finds sdmc:/wipeout/track01/.
+ * Override it here so game_init() asset checks resolve correctly. */
+bool file_exists(const char *path) {
+    /* If the path already looks absolute (starts with sdmc: or /) use it
+     * directly; otherwise prepend the assets root. */
+    char full[512];
+    if (path[0] == 's' || path[0] == '/') {
+        snprintf(full, sizeof(full), "%s", path);
+    } else {
+        snprintf(full, sizeof(full), ASSETS_PATH "/%s", path);
+    }
+    struct stat st;
+    bool result = (stat(full, &st) == 0);
+    TRACE("file_exists: %s -> %s (%s)", path, full, result ? "yes" : "no");
+    return result;
 }
 
 FILE *platform_open_asset(const char *name, const char *mode) {

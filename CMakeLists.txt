@@ -263,14 +263,17 @@ if(SWITCH_PLATFORM)
 		$ENV{DEVKITPRO}/portlibs/switch/include
 	)
 
-	# GL functions resolved dynamically via eglGetProcAddress — do not link
-	# libGLESv2 statically. Link EGL, mesa internals, libnx.
+	# Link libGLESv2 statically — ppsspp confirms this is required on Switch.
+	# eglGetProcAddress returns dispatch table stubs for core GLES2 functions
+	# that crash when called; the static link gives real initialized symbols.
+	find_library(LIBGLESV2    GLESv2      REQUIRED)
 	find_library(LIBMESA_EGL  EGL         REQUIRED)
 	find_library(LIBGLAPI     glapi       REQUIRED)
 	find_library(LIBDRM       drm_nouveau REQUIRED)
 	find_library(LIBNX        nx          REQUIRED)
 
 	target_link_libraries(wipeout PRIVATE
+		${LIBGLESV2}
 		${LIBMESA_EGL}
 		${LIBGLAPI}
 		${LIBDRM}
