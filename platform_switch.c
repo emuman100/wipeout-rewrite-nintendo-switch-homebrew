@@ -341,13 +341,12 @@ static void audio_update(void) {
     AudioOutBuffer *released = NULL;
     u32 released_count = 0;
 
-    /*
-     * Block until the hardware finishes playing a buffer.
-     * audoutWaitPlayFinish is used instead of audoutGetReleasedAudioOutBuffer
-     * to avoid silent audio gaps when a frame runs longer than ~33ms.
-     * This matches the pattern in the switchbrew audio/echo example.
-     */
-    Result rc = audoutWaitPlayFinish(&released, &released_count, UINT64_MAX);
+    /* Non-blocking poll for a released buffer.
+     * audoutWaitPlayFinish with UINT64_MAX blocks for the full buffer duration
+     * (~42ms at 48000Hz/2048 samples), starving the game loop at 30fps.
+     * Instead poll with zero timeout and skip if no buffer is ready — the
+     * game loop timing is driven by vsync/eglSwapBuffers, not audio. */
+    Result rc = audoutGetReleasedAudioOutBuffer(&released, &released_count);
     if (R_FAILED(rc) || released_count == 0) return;
 
     /* Use cached HW parameters (constant after audio_init) */
@@ -512,7 +511,21 @@ void platform_video_cleanup(void) {
 }
 
 void platform_prepare_frame(void) {
-    /* Nothing special needed before rendering a frame on Switch */
+    static int prep_count = 0;
+    if (prep_count < 3) {
+        /* Query whatever FBO is currently bound (set by render_frame_prepare) */
+        GLint current_fbo = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &current_fbo);
+        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        TRACE("prepare_frame %d: bound_fbo=%d fbo_status=0x%x (%s)", prep_count,
+            current_fbo, status,
+            status == 0x8CD5 ? "COMPLETE" :
+            status == 0x8CD6 ? "INCOMPLETE_ATTACHMENT" :
+            status == 0x8CD7 ? "INCOMPLETE_MISSING_ATTACHMENT" :
+            status == 0x8CD9 ? "INCOMPLETE_DIMENSIONS" :
+            status == 0x8CDD ? "UNSUPPORTED" : "UNKNOWN");
+        prep_count++;
+    }
 }
 
 void platform_end_frame(void) {
