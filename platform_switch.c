@@ -630,23 +630,9 @@ void platform_pump_events(void) {
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
 
-    /*
-     * Lock the exit so that if the user presses the Home button mid-game
-     * the OS waits for our cleanup before force-terminating (up to 15 s).
-     * This protects in-flight save writes and ensures audio/EGL teardown
-     * completes cleanly before hbmenu regains control.
-     *
-     * appletLockExit is only valid when running as a full Application
-     * (launched via "hold R" in hbmenu). In LibraryApplet mode (normal
-     * hbmenu launch) this call fails with am error 2168-0002 and crashes.
-     * We check the applet type first and only lock if appropriate.
-     */
-    bool exit_locked = false;
-    if (appletGetAppletType() == AppletType_Application ||
-        appletGetAppletType() == AppletType_SystemApplication) {
-        appletLockExit();
-        exit_locked = true;
-    }
+    /* appletLockExit is deliberately omitted — it crashes with 2168-0002
+     * when launched from hbmenu in LibraryApplet mode (the common case).
+     * It is only valid for full Applications launched via "hold R". */
 
     /* ---- libnx services ---- */
 
@@ -662,7 +648,6 @@ int main(int argc, char *argv[]) {
     if (!egl_init()) {
         TRACE("egl_init: FAILED");
         log_close();
-        if (exit_locked) appletUnlockExit();
         return 1;
     }
     TRACE("egl_init: OK");
@@ -712,7 +697,5 @@ int main(int argc, char *argv[]) {
      * completes. If we exited normally (in-game quit), this is a no-op
      * and main() returns 0, handing control back to hbmenu.
      */
-    if (exit_locked) appletUnlockExit();
-
     return 0;
 }
