@@ -39,13 +39,12 @@ cd wipeout-rewrite
 ### 2 — Merge the port files
 
 Copy the downloaded port files into the cloned repo, merging with the existing
-directory structure. Note that `CMakeLists_switch.txt` must be **renamed** to
-`CMakeLists.txt`, replacing the upstream one:
+directory structure. `CMakeLists.txt` replaces the upstream one directly:
 
 ```bash
 cp platform_switch.c       src/
 cp render_gles2_compat.h   src/
-cp CMakeLists_switch.txt   CMakeLists.txt   # rename: replaces upstream file
+cp CMakeLists.txt          .                # replaces upstream CMakeLists.txt
 cp Makefile.switch         .
 mkdir -p switch
 cp icon.jpg                switch/icon.jpg  # hbmenu icon
