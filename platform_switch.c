@@ -541,8 +541,9 @@ void platform_end_frame(void) {
 #include <sys/stat.h>   /* mkdir */
 
 /* SD card paths */
-#define ASSETS_PATH   "sdmc:/wipeout"
 #define USERDATA_PATH "sdmc:/switch/wipegame/userdata"
+/* Asset paths use sdmc:/<name> since asset names already include the
+ * wipeout/ prefix (e.g. "wipeout/textures/drfonts.cmp") */
 
 /* Ensure the userdata directory exists; called once from main() */
 static void userdata_dir_init(void) {
@@ -569,7 +570,7 @@ bool __wrap_file_exists(const char *path) {
 
 FILE *platform_open_asset(const char *name, const char *mode) {
     char path[512];
-    snprintf(path, sizeof(path), ASSETS_PATH "/%s", name);
+    snprintf(path, sizeof(path), "sdmc:/%s", name);
     return fopen(path, mode);
 }
 
