@@ -283,6 +283,10 @@ if(SWITCH_PLATFORM)
 		m
 	)
 
+	target_link_options(wipeout PRIVATE
+		-Wl,--wrap=file_exists
+	)
+
 	# Generate NRO from the ELF
 	find_program(ELF2NRO  elf2nro  HINTS $ENV{DEVKITPRO}/tools/bin REQUIRED)
 	find_program(NACPTOOL nacptool HINTS $ENV{DEVKITPRO}/tools/bin)

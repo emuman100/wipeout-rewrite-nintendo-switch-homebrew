@@ -551,12 +551,10 @@ static void userdata_dir_init(void) {
     mkdir(USERDATA_PATH, 0777);
 }
 
-/* file_exists() in utils.c uses a bare relative path which doesn't work on
- * Switch — stat("wipeout/track01/") never finds sdmc:/wipeout/track01/.
- * Override it here so game_init() asset checks resolve correctly. */
-bool file_exists(const char *path) {
-    /* If the path already looks absolute (starts with sdmc: or /) use it
-     * directly; otherwise prepend the assets root. */
+/* file_exists() in utils.c uses bare relative paths which don't resolve on
+ * Switch. The linker --wrap=file_exists flag redirects all calls here.
+ * We prepend ASSETS_PATH for relative paths so game_init() finds the assets. */
+bool __wrap_file_exists(const char *path) {
     char full[512];
     if (path[0] == 's' || path[0] == '/') {
         snprintf(full, sizeof(full), "%s", path);
