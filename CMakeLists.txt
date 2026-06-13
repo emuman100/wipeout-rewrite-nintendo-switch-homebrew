@@ -213,7 +213,7 @@ if(using_gl)
 		target_link_libraries(wipeout PUBLIC OpenGL::GL)
 	endif()
 
-	if(NOT APPLE)
+	if(NOT APPLE AND NOT SWITCH_PLATFORM)
 		target_include_directories(wipeout PRIVATE ${GLEW_INCLUDE_DIRS})
 		target_link_libraries(wipeout PRIVATE GLEW::GLEW)
 	endif()
