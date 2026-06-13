@@ -120,17 +120,13 @@ static inline void glPolygonMode(unsigned int face, unsigned int mode) {
  * glTexParameterf(..., GL_TEXTURE_MAX_ANISOTROPY_EXT, 0.0) is invalid
  * (minimum is 1.0) and corrupts the atlas texture sampler state,
  * causing all texture lookups to return black.
- * No-op both calls entirely on Switch. */
-#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
-#  define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
-#endif
-#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
-#  define GL_TEXTURE_MAX_ANISOTROPY_EXT     0x84FE
-#endif
-/* Override glTexParameterf to skip anisotropy parameter silently */
+ * No-op the anisotropy parameter on Switch by wrapping glTexParameterf.
+ *
+ * IMPORTANT: define the wrapper BEFORE defining the macro so that the
+ * wrapper body calls the real libGLESv2 glTexParameterf symbol, not itself. */
 static inline void _switch_glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
     if (pname == GL_TEXTURE_MAX_ANISOTROPY_EXT) return;
-    glTexParameterf(target, pname, param);
+    glTexParameterf(target, pname, param);  /* real symbol — macro not yet defined */
 }
 #define glTexParameterf _switch_glTexParameterf
 
