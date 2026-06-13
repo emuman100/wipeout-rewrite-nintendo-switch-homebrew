@@ -34,6 +34,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -55,6 +56,19 @@ static void log_close(void) {
         if (s_log) { fprintf(s_log, fmt "\n", ##__VA_ARGS__); fflush(s_log); } \
     } while(0)
 #endif
+
+/* Redirect printf to the debug log so die() messages are captured.
+ * die() in utils.h calls printf() then exit(1); without this the error
+ * message is lost and we only see the crash, not the cause. */
+int printf(const char *fmt, ...) {
+    if (!s_log) return 0;
+    va_list args;
+    va_start(args, fmt);
+    int r = vfprintf(s_log, fmt, args);
+    va_end(args);
+    fflush(s_log);
+    return r;
+}
 
 /* devkitPro / libnx */
 #include <switch.h>
@@ -84,7 +98,7 @@ static void log_close(void) {
  * hbmenu runs as LibraryApplet and suspends the foreground app, giving
  * our NRO a valid applet context with display access.
  */
-u32 __nx_applet_type = AppletType_LibraryApplet;
+u32 __nx_applet_type = AppletType_SystemApplication;
 
 static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
 static EGLContext s_egl_context = EGL_NO_CONTEXT;
