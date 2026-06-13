@@ -122,6 +122,11 @@ static inline void glGetTexImage(unsigned int target, int level,
     (void)target; (void)level; (void)format; (void)type; (void)pixels;
 }
 
+/* render_textures_dump uses glGetTexImage — suppress the whole function on
+ * Switch so the compiler never sees the potentially-uninitialized pixels
+ * variable in render_gl.c:render_textures_dump(). */
+#define render_textures_dump(path) ((void)(path))
+
 /* -------------------------------------------------------------------------
  * Dynamic GL function resolution
  *

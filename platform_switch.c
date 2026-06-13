@@ -1,10 +1,17 @@
 /*
- * Define RENDER_GL_FUNC_IMPL before the force-included render_gles2_compat.h
- * is processed. This causes the GL function pointer variables to be *defined*
- * (not just declared extern) in this translation unit, and makes
- * render_init_gl_funcs() available for calling after eglMakeCurrent.
+ * RENDER_GL_FUNC_IMPL must be defined before render_gles2_compat.h is seen.
+ * This causes the GL function pointer variables to be *defined* (not just
+ * declared extern) in this translation unit, and makes render_init_gl_funcs()
+ * available for calling after eglMakeCurrent.
+ *
+ * We include the header explicitly here so the file is self-contained
+ * regardless of whether the build system supplies a -include flag.
+ * render_gl.c sees the header via -include (CMake/Makefile) or can also
+ * include it explicitly without RENDER_GL_FUNC_IMPL, giving it only the
+ * extern declarations and the gl* macro redirections.
  */
 #define RENDER_GL_FUNC_IMPL
+#include "render_gles2_compat.h"
 
 /*
  * platform_switch.c
