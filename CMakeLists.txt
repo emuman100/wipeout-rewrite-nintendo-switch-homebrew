@@ -48,7 +48,9 @@ if (DEV_BUILD)
 endif()
 
 find_package(OpenGL)
-find_package(GLEW)
+if(NOT SWITCH_PLATFORM)
+	find_package(GLEW)
+endif()
 find_package(SDL2)
 
 set(common_src
@@ -282,8 +284,8 @@ if(SWITCH_PLATFORM)
 	find_program(ELF2NRO  elf2nro  HINTS $ENV{DEVKITPRO}/tools/bin REQUIRED)
 	find_program(NACPTOOL nacptool HINTS $ENV{DEVKITPRO}/tools/bin)
 
-	set(NACP_FILE ${CMAKE_BINARY_DIR}/wipeout.nacp)
-	set(NRO_FILE  ${CMAKE_BINARY_DIR}/wipeout.nro)
+	set(NACP_FILE ${CMAKE_BINARY_DIR}/wipegame.nacp)
+	set(NRO_FILE  ${CMAKE_BINARY_DIR}/wipegame.nro)
 
 	if(NACPTOOL)
 		add_custom_command(TARGET wipeout POST_BUILD
