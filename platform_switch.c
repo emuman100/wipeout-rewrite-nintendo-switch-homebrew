@@ -262,10 +262,13 @@ static bool audio_init(void) {
     s_audio_buffer_size = (s_audio_buffer_size + 0xFFF) & ~0xFFF;
 
     /* Pre-allocate the float conversion buffer once (avoids per-frame malloc).
-     * Sized for the maximum source samples at 44100 Hz that map to one HW frame. */
+     * Sized for total floats: max source frames * channels.
+     * src_frames = ceil(hw_frames * 44100/48000) + 2; multiply by channels
+     * for the total float count passed to the mix callback. */
     u32 max_hw_samples = s_audio_buffer_size / (s_audio_channel_count * sizeof(s16));
-    u32 max_src_samples = (u32)((double)max_hw_samples * 44100.0 / s_audio_sample_rate) + 2;
-    s_float_buf = (float *)malloc(max_src_samples * s_audio_channel_count * sizeof(float));
+    u32 max_src_frames = (u32)((double)max_hw_samples * 44100.0 / s_audio_sample_rate) + 2;
+    u32 max_src_floats = max_src_frames * s_audio_channel_count;
+    s_float_buf = (float *)malloc(max_src_floats * sizeof(float));
     if (!s_float_buf) {
         TRACE("platform_switch: float_buf alloc failed");
         audoutExit();
@@ -293,7 +296,7 @@ static bool audio_init(void) {
         s_audio_buffers[i].data_offset = 0;
     }
 
-    TRACE("audio_init: buffer_size=%u hw_samples=%u src_samples=%u", s_audio_buffer_size, max_hw_samples, max_src_samples);
+    TRACE("audio_init: buffer_size=%u hw_samples=%u src_frames=%u src_floats=%u", s_audio_buffer_size, max_hw_samples, max_src_frames, max_src_floats);
     rc = audoutStartAudioOut();
     if (R_FAILED(rc)) {
         TRACE("platform_switch: audoutStartAudioOut failed: 0x%x", rc);
@@ -354,19 +357,27 @@ static void audio_update(void) {
 
     /* Ask the game mixer for 44100 Hz samples, then resample to 48000 Hz.
      * The sfx mixer assumes 44100 Hz output — requesting at the wrong rate
-     * would shift pitch of all SFX and music. */
-    u32 src_samples = (u32)((double)hw_num_samples * 44100.0 / s_audio_sample_rate) + 2;
+     * would shift pitch of all SFX and music.
+     *
+     * IMPORTANT: the mix callback's `len` parameter is total float count
+     * (frames * channels), matching the upstream SDL platform which passes
+     * `len_bytes / sizeof(float)`.  We must pass src_frames * channels,
+     * NOT src_frames alone — passing only src_frames starves the mixer,
+     * producing garbled/slow audio because it fills only the L channel. */
+    u32 src_frames  = (u32)((double)hw_num_samples * 44100.0 / s_audio_sample_rate) + 2;
+    u32 src_samples = src_frames * s_audio_channel_count;  /* total floats */
 
-    memset(s_float_buf, 0, src_samples * s_audio_channel_count * sizeof(float));
+    memset(s_float_buf, 0, src_samples * sizeof(float));
     s_audio_mix_cb(s_float_buf, src_samples);
 
-    /* Resample 44100 → 48000 with linear interpolation, then convert to s16le */
+    /* Resample 44100 → 48000 with linear interpolation, then convert to s16le.
+     * Position math is in frames; buffer indexing uses frames * channels. */
     s16 *out = (s16 *)released->buffer;
     for (u32 i = 0; i < hw_num_samples; i++) {
         double src_pos = (double)i * 44100.0 / s_audio_sample_rate;
         u32 src_i = (u32)src_pos;
         float frac = (float)(src_pos - src_i);
-        if (src_i + 1 >= src_samples) src_i = src_samples - 2;
+        if (src_i + 1 >= src_frames) src_i = src_frames - 2;
 
         for (u32 ch = 0; ch < s_audio_channel_count; ch++) {
             float s0 = s_float_buf[src_i * s_audio_channel_count + ch];
