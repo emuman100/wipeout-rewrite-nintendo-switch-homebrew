@@ -114,19 +114,20 @@ static bool s_wants_exit = false;
 
 /* Screen dimensions — docked mode uses 1920×1080, handheld uses 1280×720.
  * The Switch hardware compositor handles the actual scaling to TV output;
- * we track the EGL surface dimensions and tell the game the logical render
- * size. eglQuerySurface gives us the ground truth regardless of applet type. */
+ * we set the NWindow dimensions and tell the game the logical render size. */
 #define SWITCH_W_HANDHELD 1280
 #define SWITCH_H_HANDHELD  720
 #define SWITCH_W_DOCKED   1920
 #define SWITCH_H_DOCKED   1080
 
-/* Last known EGL surface dimensions — used to detect dock/undock transitions.
- * appletGetOperationMode() is unreliable for NROs launched from hbmenu
- * (returns Handheld regardless of dock state). eglQuerySurface reports the
- * actual framebuffer dimensions from the compositor, which is ground truth. */
-static int s_surface_w = SWITCH_W_HANDHELD;
-static int s_surface_h = SWITCH_H_HANDHELD;
+static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
+    if (mode == AppletOperationMode_Console)
+        return (vec2i_t){ SWITCH_W_DOCKED, SWITCH_H_DOCKED };
+    return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
+}
+
+/* Last known applet operation mode — used to detect dock/undock transitions */
+static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
 
 /* Audio */
 static AudioOutBuffer s_audio_buffers[2];
@@ -157,7 +158,7 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: nwindow OK");
 
-    vec2i_t initial_size = { SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
+    vec2i_t initial_size = screen_size_for_mode(s_op_mode);
     nwindowSetDimensions(s_nwindow, initial_size.x, initial_size.y);
 
     s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -222,26 +223,18 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: eglMakeCurrent OK");
 
-    /* Query actual surface dimensions from the compositor — this is the
-     * ground truth for initial resolution. appletGetOperationMode() is
-     * unreliable for hbmenu-launched NROs; eglQuerySurface is not. */
-    EGLint surf_w = SWITCH_W_HANDHELD, surf_h = SWITCH_H_HANDHELD;
-    eglQuerySurface(s_egl_display, s_egl_surface, EGL_WIDTH,  &surf_w);
-    eglQuerySurface(s_egl_display, s_egl_surface, EGL_HEIGHT, &surf_h);
-    s_surface_w = (int)surf_w;
-    s_surface_h = (int)surf_h;
-    TRACE("egl_init: surface dimensions %dx%d (%s)",
-          s_surface_w, s_surface_h,
-          (s_surface_w == SWITCH_W_DOCKED) ? "docked 1080p" : "handheld 720p");
-
     /* GL functions are resolved via static libGLESv2 link (confirmed correct
      * approach by ppsspp Switch port). render_init_gl_funcs() is a no-op. */
     render_init_gl_funcs();
     TRACE("egl_init: GL via static libGLESv2 link OK");
 
 
-    /* Disable vsync so the game can manage its own timing */
-    eglSwapInterval(s_egl_display, 0);
+    /* Enable vsync — matches upstream SDL platform (SDL_GL_SetSwapInterval(1))
+     * and confirmed working in ppsspp and gzdoom Switch ports.
+     * eglSwapBuffers blocks at 60Hz, pacing the main loop and allowing the
+     * CPU to idle between frames. game logic runs at 30fps via the delta-time
+     * accumulator in system_update — vsync does not affect game speed. */
+    eglSwapInterval(s_egl_display, 1);
 
     /* Drain any stale GL errors generated during mesa initialisation.
      * ppsspp explicitly does this after glewInit() with the comment
@@ -539,7 +532,7 @@ void platform_exit(void) {
 }
 
 vec2i_t platform_screen_size(void) {
-    return (vec2i_t){ s_surface_w, s_surface_h };
+    return screen_size_for_mode(s_op_mode);
 }
 
 double platform_now(void) {
@@ -737,21 +730,18 @@ void platform_pump_events(void) {
         return;
     }
 
-    /* Detect dock/undock by polling actual EGL surface dimensions.
-     * appletGetOperationMode() is unreliable for hbmenu-launched NROs —
-     * it returns Handheld regardless of dock state. eglQuerySurface reports
-     * what the compositor actually gave us, which changes on dock/undock. */
-    EGLint new_w = s_surface_w, new_h = s_surface_h;
-    eglQuerySurface(s_egl_display, s_egl_surface, EGL_WIDTH,  &new_w);
-    eglQuerySurface(s_egl_display, s_egl_surface, EGL_HEIGHT, &new_h);
-    if ((int)new_w != s_surface_w || (int)new_h != s_surface_h) {
-        s_surface_w = (int)new_w;
-        s_surface_h = (int)new_h;
-        vec2i_t new_size = { s_surface_w, s_surface_h };
+    /* Detect dock/undock transitions and resize the renderer accordingly.
+     * appletGetOperationMode() returns AppletOperationMode_Handheld (0)
+     * or AppletOperationMode_Console (1, docked). When the mode changes
+     * we update the NWindow dimensions and call system_resize() so the
+     * render resolution and projection matrices update immediately. */
+    AppletOperationMode current_mode = appletGetOperationMode();
+    if (current_mode != s_op_mode) {
+        s_op_mode = current_mode;
+        vec2i_t new_size = screen_size_for_mode(current_mode);
+        nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
         system_resize(new_size);
-        TRACE("dock/undock: surface now %dx%d (%s)",
-              s_surface_w, s_surface_h,
-              (s_surface_w == SWITCH_W_DOCKED) ? "docked 1080p" : "handheld 720p");
+        TRACE("dock/undock: mode=%d size=%dx%d", (int)current_mode, new_size.x, new_size.y);
     }
 
     /* Feed the input system */
@@ -780,6 +770,12 @@ int main(int argc, char *argv[]) {
     /* Open debug log — directory guaranteed to exist after userdata_dir_init */
     log_open();
     TRACE("wipegame starting");
+
+    /* Sample the initial operation mode so platform_screen_size() returns
+     * the correct resolution before the first dock/undock event fires. */
+    s_op_mode = appletGetOperationMode();
+    TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
+          s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
 
     /* ---- EGL + GLES2 ---- */
     TRACE("egl_init: starting");
