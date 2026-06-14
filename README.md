@@ -442,7 +442,9 @@ freed before gameplay begins.
 | **Port direction & oversight** | emuman100 |
 | **Dreamcast port reference** | [jnmartin84](https://github.com/jnmartin84) — [wipeout-dc](https://github.com/jnmartin84/wipeout-dc) |
 | **PS Vita port reference** | [Rinnegatamante](https://github.com/Rinnegatamante) — wipeout-rewrite vita port |
-| **Renderer reference** | [m4xw (ppsspp)](https://github.com/m4xw/ppsspp) and [fgsfdsfgs (gzdoom)](https://github.com/fgsfdsfgs/gzdoom) Switch ports — used to diagnose and fix mesa/GLES2 renderer issues, in particular the static libGLESv2 linking requirement and GL error drain approach |
+| **Renderer reference** | [m4xw (ppsspp)](https://github.com/m4xw/ppsspp) Switch port — direct source of the static libGLESv2 linking requirement and GL error drain approach that fixed the renderer. [fgsfdsfgs (gzdoom)](https://github.com/fgsfdsfgs/gzdoom) Switch port — used as a corroborating cross-reference for GLES2 context setup and applet handling |
+| **Atmosphère** | [Sciresm and the Atmosphère team](https://github.com/Atmosphere-NX/Atmosphere) — custom firmware that makes Switch homebrew possible |
+| **devkitPro** | [devkitPro team](https://devkitpro.org) — toolchain, libnx, and documentation without which this port could not exist |
 
 ---
 
