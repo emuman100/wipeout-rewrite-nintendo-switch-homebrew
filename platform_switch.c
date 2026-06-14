@@ -456,6 +456,12 @@ static void input_update(void) {
     input_set_button_state(INPUT_GAMEPAD_L_STICK_PRESS, (held & HidNpadButton_StickL) ? 1.0f : 0.0f);
     input_set_button_state(INPUT_GAMEPAD_R_STICK_PRESS, (held & HidNpadButton_StickR) ? 1.0f : 0.0f);
 
+    /* INPUT_GAMEPAD_HOME (124) is intentionally not mapped.
+     * The Switch Home button is OS-reserved and cannot be read by applications.
+     * The game never binds INPUT_GAMEPAD_HOME to any action in game.c — it only
+     * appears in the button name table (input.c) and the SDL platform's gamepad
+     * map. Omitting it here has no effect on gameplay or the controls menu. */
+
     /* ---- Analog stick → axis values ---- */
 
     /* Left stick X → steering (range -1..1) */
@@ -647,7 +653,11 @@ uint8_t *platform_load_userdata(const char *name, uint32_t *out_size) {
     snprintf(path, sizeof(path), USERDATA_PATH "/%s", name);
 
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
+    if (!f) {
+        /* Match upstream SDL platform: zero *out_size when file doesn't exist */
+        if (out_size) *out_size = 0;
+        return NULL;
+    }
 
     fseek(f, 0, SEEK_END);
     long size = ftell(f);

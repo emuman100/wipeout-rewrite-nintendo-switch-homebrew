@@ -37,7 +37,7 @@ ARCH     := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
 CFLAGS   := -g -Wall -O2 -ffunction-sections -fdata-sections \
             $(ARCH) $(INCLUDE) -D__SWITCH__ -DPLATFORM_SWITCH=1 \
-            -DRENDERER_GLES2=1 \
+            -DRENDERER_GL=1 \
             -DUSE_GLES2=1 \
             -std=gnu11 \
             -include $(CURDIR)/src/render_gles2_compat.h
@@ -50,11 +50,12 @@ LDFLAGS  := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) \
 
 #---------------------------------------------------------------------------------
 # Libraries
-# libGLESv2 is NOT linked — GL functions are resolved dynamically via
-# eglGetProcAddress after eglMakeCurrent (see render_gles2_compat.h).
-# This matches ppsspp (m4xw) and gzdoom (fgsfdsfgs) Switch ports.
+# libGLESv2 is linked statically — required because eglGetProcAddress returns
+# dispatch table stubs for core GLES2 functions that crash on Switch (mesa's
+# nouveau shader compiler initialises lazily and the stub path bypasses that
+# init). Static link gives real initialized symbols. Confirmed by ppsspp port.
 #---------------------------------------------------------------------------------
-LIBS     := -lEGL -lglapi -ldrm_nouveau -lnx -lm
+LIBS     := -lGLESv2 -lEGL -lglapi -ldrm_nouveau -lnx -lm
 
 LIBDIRS  := $(PORTLIBS) $(LIBNX)
 
