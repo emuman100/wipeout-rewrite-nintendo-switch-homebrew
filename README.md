@@ -4,6 +4,8 @@ A Nintendo Switch NRO port of [phoboslab/wipeout-rewrite](https://github.com/pho
 
 > **You need a legally obtained copy of the original PlayStation WipEout disc** to supply the game data. The port itself contains no game content.
 
+> **This port is functional but largely untested.** It has been developed and verified on a single Switch unit running Atmosphère. Compatibility across different firmware versions, hardware revisions, and CFW configurations has not been broadly tested. If you try it, feedback is welcome — bug reports and test results from different setups are especially useful at this stage.
+
 ---
 
 ## Requirements
@@ -110,6 +112,11 @@ sdmc:/switch/wipegame/wipegame.nro
 For instructions on obtaining and extracting the required game data files, follow
 the directions in the [upstream wipeout-rewrite README](https://github.com/phoboslab/wipeout-rewrite#usage).
 
+> **The game data must be present and in the correct location before launching.**
+> If the required files are missing or in the wrong place the app will
+> terminate immediately with no error message. The intro movie
+> (`intro.mpeg`) is the only optional file — its absence is handled gracefully.
+
 Once extracted, your SD card should have the following structure:
 
 ```
@@ -125,12 +132,12 @@ sdmc:/
     ├── track02/
     │   ...
     ├── track15/
-    ├── music/
+    ├── music/               (optional)
     │   ├── track01.qoa
     │   ├── track02.qoa
     │   │   ...
     │   └── track08.qoa
-    └── intro.mpeg
+    └── intro.mpeg           (optional)
 ```
 
 ### 3 — Install music (optional)
@@ -160,9 +167,8 @@ screen. If present but unreadable, the same skip occurs — it will not crash.
 
 ### 5 — Launch
 
-Open the Homebrew Menu on your Switch (hold **R** while launching any game,
-or use Album if configured), find **wipegame** — it will appear with the
-original WipEout logo icon — and launch it.
+Open the Homebrew Menu on your Switch, find **wipegame** — it will appear
+with the original WipEout logo icon — and press **A** to launch it.
 
 ---
 
@@ -181,8 +187,7 @@ original WipEout logo icon — and launch it.
 | **L** | Left airbrake |
 | **R** | Right airbrake |
 | **D-Pad** | Steer / pitch nose up-down |
-| **Left stick** | Steer / navigate menus |
-| **Right stick** | Camera look |
+| **Left stick** | Navigate menus only (see note below) |
 | **+** (Plus) | Pause |
 
 ### Menus
@@ -197,10 +202,11 @@ original WipEout logo icon — and launch it.
 
 ### Notes
 
+- **Left stick steering** — the left stick navigates menus but does **not** steer in-game by default. This is an upstream limitation: the default control bindings map steering to the D-pad only. To use the left stick for steering, go to Options → Controls and manually bind Left/Right/Up/Down to the stick axes.
+- **Right stick** — reported to the input system but not bound to any action in the upstream game code. There is no camera look action to drive. It can be bound to any action via Options → Controls, but camera look is not available as a rebindable target.
 - **ZR and ZL** are mapped to fire weapon and absorb respectively. They can be rebound to any action via Options → Controls.
-- **Right stick** controls camera look. All four axes and the stick click are reported to the input system and are rebindable in Options → Controls.
-- **Analog steering** works out of the box via the left stick. The left stick also navigates menus.
 - **Unpausing**: press **+** to open the pause menu, navigate to **CONTINUE**, press **A**.
+- **Home button** exits the game and returns to the Switch main menu. Save data is written before exit.
 
 ---
 
@@ -213,9 +219,8 @@ sdmc:/switch/wipegame/userdata/
 ```
 
 This directory is created automatically on first launch. It requires no title
-ID, no save-data partition, and no special permissions. Files can be copied to
-or from a PC using any USB file manager. High scores, control remappings,
-graphics settings, and race progress all persist here across sessions.
+ID, no save-data partition, and no special permissions. High scores and race
+progress persist here across sessions.
 
 ---
 
@@ -275,8 +280,9 @@ hardware compositor handles the final output to the TV.
 
 **Render pipeline:** The game renders to an offscreen FBO (render-to-texture),
 then blits it to the EGL surface via a fullscreen quad. This supports
-the three built-in render resolutions (240p, 480p, native 720p) and both
-post-effect modes (none, CRT scanline), all selectable in-game.
+the three built-in render resolutions (240p, 480p, native) and both
+post-effect modes (none, CRT scanline), all selectable in-game. Native
+resolution is 1280×720 in handheld mode and 1920×1080 when docked.
 
 **Texture atlas:** A single 2048×2048 RGBA8 GPU texture holds all game
 textures. The CPU-side packing buffer is allocated from the hunk
@@ -359,9 +365,16 @@ matching the contract expected by the upstream input layer.
 **Analog stick:** The left stick's Y axis is corrected for the libnx
 convention (positive = up physically) vs the SDL/game convention
 (positive = down), so menu navigation with the stick is correct in
-both axes. The right stick is polled identically and reports all four
-axes plus stick-click to the input layer for camera look and rebinding.
-Both stick-click buttons (L3 / R3) are also reported.
+both axes. The left stick navigates menus out of the box via a
+system-layer binding, but does not steer in-game by default — the
+upstream game binds steering actions to the D-pad only. Analog
+steering requires manual remapping via Options → Controls.
+
+The right stick is polled and all four axes plus stick-click are
+reported to the input layer, but the upstream game defines no camera
+look action for it to drive. It can be rebound to any available action
+via Options → Controls, but camera look is not a rebindable target.
+Both stick-click buttons (L3 / R3) are reported.
 
 ---
 
@@ -414,8 +427,8 @@ freed before gameplay begins.
 
 | Item | Notes |
 |---|---|
+| **Analog stick steering** | Left stick does not steer in-game by default — requires manual remapping via Options → Controls. A future fix would set default bindings for the Switch. |
 | **Rumble** | libnx exposes `hidSendVibrationValue()`; mapping it to ship collision events in `ship.c` would improve feel. |
-| **Touchscreen** | Not implemented. All input is button-based. |
 
 ---
 
@@ -428,6 +441,8 @@ freed before gameplay begins.
 | **Nintendo Switch port** | Claude (Anthropic) — AI-developed under the direction of **emuman100** |
 | **Port direction & oversight** | emuman100 |
 | **Dreamcast port reference** | [jnmartin84](https://github.com/jnmartin84) — [wipeout-dc](https://github.com/jnmartin84/wipeout-dc) |
+| **PS Vita port reference** | [Rinnegatamante](https://github.com/Rinnegatamante) — wipeout-rewrite vita port |
+| **Renderer reference** | [m4xw (ppsspp)](https://github.com/m4xw/ppsspp) and [fgsfdsfgs (gzdoom)](https://github.com/fgsfdsfgs/gzdoom) Switch ports — used to diagnose and fix mesa/GLES2 renderer issues, in particular the static libGLESv2 linking requirement and GL error drain approach |
 
 ---
 
