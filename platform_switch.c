@@ -216,15 +216,6 @@ static bool egl_init(void) {
 
     /* Disable vsync so the game can manage its own timing */
     eglSwapInterval(s_egl_display, 0);
-
-    /* Drain any GL errors left over from EGL/mesa initialisation so that
-     * frame 0 glGetError only captures errors from actual game rendering. */
-    { GLenum _e; int _n = 0;
-      while ((_e = glGetError()) != GL_NO_ERROR) {
-          TRACE("egl_init: draining stale GL error 0x%x", _e);
-          if (++_n > 16) break;
-      }
-    }
     TRACE("egl_init: done");
 
     return true;
@@ -542,10 +533,12 @@ void platform_end_frame(void) {
     static int frame_count = 0;
     if (frame_count < 5) {
         GLenum gl_err = glGetError();
+        TRACE("frame %d: pre-swap glGetError=0x%x", frame_count, gl_err);
         EGLBoolean swap_ok = eglSwapBuffers(s_egl_display, s_egl_surface);
+        GLenum gl_err2 = glGetError();
         EGLint egl_err = eglGetError();
-        TRACE("frame %d: glGetError=0x%x eglSwapBuffers=%d eglGetError=0x%x",
-            frame_count, gl_err, (int)swap_ok, (int)egl_err);
+        TRACE("frame %d: post-swap glGetError=0x%x eglSwapBuffers=%d eglGetError=0x%x",
+            frame_count, gl_err2, (int)swap_ok, (int)egl_err);
         frame_count++;
     } else {
         eglSwapBuffers(s_egl_display, s_egl_surface);
@@ -726,6 +719,7 @@ int main(int argc, char *argv[]) {
     TRACE("system_init: starting");
     system_init();
     TRACE("system_init: OK");
+    { GLenum _e = glGetError(); TRACE("post-system_init glGetError=0x%x", _e); }
 
     /* ---- Main loop — mirrors DC port exactly ---- */
     TRACE("entering main loop");
@@ -733,7 +727,11 @@ int main(int argc, char *argv[]) {
         platform_pump_events();
         if (s_wants_exit) break;   /* appletMainLoop() signalled exit; don't run another frame */
         platform_prepare_frame();
+        { static int _fc=0; if(_fc<3){ GLenum _e=glGetError();
+          TRACE("post-prepare_frame %d: glGetError=0x%x",_fc,_e); _fc++; } }
         system_update();   /* owns timing, render_frame_prepare/end, game_update, input_clear */
+        { static int _fc=0; if(_fc<3){ GLenum _e=glGetError();
+          TRACE("post-system_update %d: glGetError=0x%x",_fc,_e); _fc++; } }
         platform_end_frame();
     }
     TRACE("main loop exited");

@@ -212,6 +212,26 @@ static inline void _switch_glGetFloatv(GLenum pname, GLfloat *params) {
 #define glGetFloatv _switch_glGetFloatv
 #define glTexParameterf(target, pname, param) ((void)(target))
 
+/* glTexParameteri — intercept mipmap min filter modes.
+ * RENDER_USE_MIPMAPS=1 causes render_gl.c to set GL_LINEAR_MIPMAP_LINEAR
+ * as the atlas min filter, but glGenerateMipmap is a no-op on Switch.
+ * A texture with a mipmap filter but no mipmap data is mipmap-incomplete
+ * in GLES2 — it samples as black and may generate GL_INVALID_VALUE.
+ * Replace any mipmap min filter with GL_LINEAR on Switch.
+ * Wrapper defined BEFORE macro to avoid recursive expansion. */
+static inline void _switch_glTexParameteri(GLenum target, GLenum pname, GLint param) {
+    if (pname == GL_TEXTURE_MIN_FILTER) {
+        if (param == GL_LINEAR_MIPMAP_LINEAR ||
+            param == GL_LINEAR_MIPMAP_NEAREST ||
+            param == GL_NEAREST_MIPMAP_LINEAR ||
+            param == GL_NEAREST_MIPMAP_NEAREST) {
+            param = GL_LINEAR;
+        }
+    }
+    glTexParameteri(target, pname, param);  /* real symbol — macro not yet defined */
+}
+#define glTexParameteri _switch_glTexParameteri
+
 /* glGetTexImage is desktop GL only */
 static inline void glGetTexImage(unsigned int target, int level,
     unsigned int format, unsigned int type, void *pixels) {
