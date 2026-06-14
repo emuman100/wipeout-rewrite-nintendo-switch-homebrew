@@ -88,15 +88,18 @@ int printf(const char *fmt, ...) {
  * Override the libnx applet type.
  *
  * mesa-switch calls viCreateManagedLayer() during eglInitialize() which
- * requires appropriate display layer access rights.
+ * requires SystemApplication-level display layer access rights.
  *
- * AppletType_SystemApplication works when launched via "hold R" title
- * override (AppletType_Application context) but conflicts with hbmenu
- * when launched normally, causing 2168-0002 from the VI service.
+ * AppletType_SystemApplication is correct for both launch paths:
+ *   - "hold R" title override (AppletType_Application context)
+ *   - Normal hbmenu NRO launch
  *
- * AppletType_LibraryApplet is correct for normal hbmenu NRO launches —
- * hbmenu runs as LibraryApplet and suspends the foreground app, giving
- * our NRO a valid applet context with display access.
+ * AppletType_LibraryApplet was tried during development and caused
+ * 2168-0002 from the VI service regardless of launch method.
+ * AppletType_SystemApplication resolved this on hardware (session 6).
+ *
+ * Note: appletLockExit() is deliberately NOT called — it also caused
+ * 2168-0002 in testing and is unnecessary for clean exit behaviour.
  */
 u32 __nx_applet_type = AppletType_SystemApplication;
 
@@ -279,11 +282,13 @@ static bool audio_init(void) {
         s_audio_data[i] = (u8 *)memalign(0x1000, s_audio_buffer_size);
         if (!s_audio_data[i]) {
             TRACE("platform_switch: audio buffer alloc failed at index %d", i);
-            /* Free any buffers already allocated before returning */
+            /* Free any DMA buffers already allocated and the float buffer */
             for (int j = 0; j < i; j++) {
                 free(s_audio_data[j]);
                 s_audio_data[j] = NULL;
             }
+            free(s_float_buf);
+            s_float_buf = NULL;
             audoutExit();
             return false;
         }
@@ -304,6 +309,8 @@ static bool audio_init(void) {
             free(s_audio_data[i]);
             s_audio_data[i] = NULL;
         }
+        free(s_float_buf);
+        s_float_buf = NULL;
         audoutExit();
         return false;
     }
@@ -589,10 +596,12 @@ static void userdata_dir_init(void) {
 
 /* file_exists() in utils.c uses bare relative paths which don't resolve on
  * Switch. The linker --wrap=file_exists flag redirects all calls here.
- * We prepend ASSETS_PATH for relative paths so game_init() finds the assets. */
+ * We prepend sdmc:/ for relative paths so game_init() finds the assets.
+ * Absolute paths (starting with '/') and already-prefixed sdmc: paths
+ * are passed through unchanged. */
 bool __wrap_file_exists(const char *path) {
     char full[512];
-    if (path[0] == 's' || path[0] == '/') {
+    if (path[0] == '/' || strncmp(path, "sdmc:", 5) == 0) {
         snprintf(full, sizeof(full), "%s", path);
     } else {
         snprintf(full, sizeof(full), "sdmc:/%s", path);
@@ -690,9 +699,9 @@ void platform_pump_events(void) {
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
 
-    /* appletLockExit is deliberately omitted — it crashes with 2168-0002
-     * when launched from hbmenu in LibraryApplet mode (the common case).
-     * It is only valid for full Applications launched via "hold R". */
+    /* appletLockExit is deliberately omitted — it caused 2168-0002
+     * in testing regardless of launch method. Clean exit is handled
+     * by the main loop checking appletMainLoop() each frame. */
 
     /* ---- libnx services ---- */
 
