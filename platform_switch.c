@@ -112,6 +112,15 @@ static NWindow *s_nwindow = NULL;
 
 static bool s_wants_exit = false;
 
+/* Screen dimensions — docked mode uses 1920×1080, handheld uses 1280×720.
+ * The Switch hardware compositor handles the actual scaling to TV output;
+ * we track the EGL surface dimensions and tell the game the logical render
+ * size. eglQuerySurface gives us the ground truth regardless of applet type. */
+#define SWITCH_W_HANDHELD 1280
+#define SWITCH_H_HANDHELD  720
+#define SWITCH_W_DOCKED   1920
+#define SWITCH_H_DOCKED   1080
+
 /* Last known EGL surface dimensions — used to detect dock/undock transitions.
  * appletGetOperationMode() is unreliable for NROs launched from hbmenu
  * (returns Handheld regardless of dock state). eglQuerySurface reports the
@@ -131,15 +140,6 @@ static float *s_float_buf = NULL; /* pre-allocated resample buffer (avoids per-f
 
 /* Controller – initialised once in main(), updated each frame */
 static PadState s_pad;
-
-/* Screen dimensions — docked mode uses 1920×1080, handheld uses 1280×720.
- * The Switch hardware compositor handles the actual scaling to TV output;
- * we track the EGL surface dimensions and tell the game the logical render
- * size. eglQuerySurface gives us the ground truth regardless of applet type. */
-#define SWITCH_W_HANDHELD 1280
-#define SWITCH_H_HANDHELD  720
-#define SWITCH_W_DOCKED   1920
-#define SWITCH_H_DOCKED   1080
 
 /* Audio buffer count — two DMA buffers alternated each frame */
 #define AUDIO_BUFFER_FRAMES 2
