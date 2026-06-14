@@ -111,6 +111,9 @@ static NWindow *s_nwindow = NULL;
 
 static bool s_wants_exit = false;
 
+/* Last known applet operation mode — used to detect dock/undock transitions */
+static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
+
 /* Audio */
 static AudioOutBuffer s_audio_buffers[2];
 static u8 *s_audio_data[2];
@@ -124,9 +127,19 @@ static float *s_float_buf = NULL; /* pre-allocated resample buffer (avoids per-f
 /* Controller – initialised once in main(), updated each frame */
 static PadState s_pad;
 
-/* Screen dimensions – Switch native resolution */
-#define SWITCH_SCREEN_W 1280
-#define SWITCH_SCREEN_H 720
+/* Screen dimensions — docked mode uses 1920×1080, handheld uses 1280×720.
+ * The Switch hardware compositor handles the actual scaling to TV output;
+ * we set the NWindow dimensions and tell the game the logical render size. */
+#define SWITCH_W_HANDHELD 1280
+#define SWITCH_H_HANDHELD  720
+#define SWITCH_W_DOCKED   1920
+#define SWITCH_H_DOCKED   1080
+
+static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
+    if (mode == AppletOperationMode_Console)
+        return (vec2i_t){ SWITCH_W_DOCKED, SWITCH_H_DOCKED };
+    return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
+}
 
 /* Audio parameters */
 #define AUDIO_SAMPLE_RATE   44100
@@ -147,7 +160,8 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: nwindow OK");
 
-    nwindowSetDimensions(s_nwindow, SWITCH_SCREEN_W, SWITCH_SCREEN_H);
+    vec2i_t initial_size = screen_size_for_mode(s_op_mode);
+    nwindowSetDimensions(s_nwindow, initial_size.x, initial_size.y);
 
     s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (s_egl_display == EGL_NO_DISPLAY) {
@@ -219,6 +233,21 @@ static bool egl_init(void) {
 
     /* Disable vsync so the game can manage its own timing */
     eglSwapInterval(s_egl_display, 0);
+
+    /* Drain any stale GL errors generated during mesa initialisation.
+     * ppsspp explicitly does this after glewInit() with the comment
+     * "glew will generate an invalid enum error, ignore."
+     * Mesa's nouveau driver can leave errors in the queue during its own
+     * init sequence; draining here prevents them from appearing as false
+     * positives in our per-frame glGetError logging. */
+    { GLenum _e; int _n = 0;
+      while ((_e = glGetError()) != GL_NO_ERROR) {
+          TRACE("egl_init: draining stale GL error 0x%x", _e);
+          if (++_n > 16) break;  /* safety cap */
+      }
+      if (_n) TRACE("egl_init: drained %d stale error(s)", _n);
+    }
+
     TRACE("egl_init: done");
 
     return true;
@@ -501,7 +530,7 @@ void platform_exit(void) {
 }
 
 vec2i_t platform_screen_size(void) {
-    return (vec2i_t){ SWITCH_SCREEN_W, SWITCH_SCREEN_H };
+    return screen_size_for_mode(s_op_mode);
 }
 
 double platform_now(void) {
@@ -695,6 +724,21 @@ void platform_pump_events(void) {
         s_wants_exit = true;
         return;
     }
+
+    /* Detect dock/undock transitions and resize the renderer accordingly.
+     * appletGetOperationMode() returns AppletOperationMode_Handheld (0)
+     * or AppletOperationMode_Console (1, docked). When the mode changes
+     * we update the NWindow dimensions and call system_resize() so the
+     * render resolution and projection matrices update immediately. */
+    AppletOperationMode current_mode = appletGetOperationMode();
+    if (current_mode != s_op_mode) {
+        s_op_mode = current_mode;
+        vec2i_t new_size = screen_size_for_mode(current_mode);
+        nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
+        system_resize(new_size);
+        TRACE("dock/undock: mode=%d size=%dx%d", (int)current_mode, new_size.x, new_size.y);
+    }
+
     /* Feed the input system */
     input_update();
 }
@@ -721,6 +765,12 @@ int main(int argc, char *argv[]) {
     /* Open debug log — directory guaranteed to exist after userdata_dir_init */
     log_open();
     TRACE("wipegame starting");
+
+    /* Sample the initial operation mode so platform_screen_size() returns
+     * the correct resolution before the first dock/undock event fires. */
+    s_op_mode = appletGetOperationMode();
+    TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
+          s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
 
     /* ---- EGL + GLES2 ---- */
     TRACE("egl_init: starting");

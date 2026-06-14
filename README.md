@@ -65,7 +65,8 @@ wipeout-rewrite/
 ```
 
 > **Do not modify any other upstream source files.** The port is entirely
-> self-contained in `platform_switch.c` and the build files.
+> self-contained in `platform_switch.c`, `render_gles2_compat.h`, and
+> the build files.
 
 ### 3 — Build with CMake (recommended)
 
@@ -237,7 +238,7 @@ graphics settings, and race progress all persist here across sessions.
 │  │  Graphics   │  │    Audio     │  │      Input        │  │
 │  │  EGL+GLES2  │  │ audout/libnx │  │  padXxx / libnx   │  │
 │  │ mesa-switch │  │ 48 kHz s16le │  │ Joy-Con, handheld │  │
-│  │  1280×720   │  │  2 DMA bufs  │  │  Pro Controller   │  │
+│  │ 720p / 1080p│  │  2 DMA bufs  │  │  Pro Controller   │  │
 │  └─────────────┘  └──────────────┘  └───────────────────┘  │
 │                                                              │
 │  ┌─────────────────────────────────────────────────────┐    │
@@ -260,12 +261,17 @@ graphics settings, and race progress all persist here across sessions.
 Tegra X1). The upstream `render_gl.c` renderer is compiled with
 `-DUSE_GLES2=1`, which enables GLSL `precision highp float;` qualifiers
 and selects `GL_DEPTH_COMPONENT16` for the renderbuffer — both required
-for strict GLES2 compliance.
+for strict GLES2 compliance. libGLESv2 is linked statically; GL functions
+are called directly rather than through `eglGetProcAddress` dispatch stubs,
+which crash on Switch mesa due to lazy shader compiler initialisation.
 
-**Framebuffer:** The NWindow is fixed at **1280×720**. In handheld mode
-this is native. In docked mode the Switch hardware compositor upscales
-to the TV's output resolution automatically; no application-side
-reconfiguration is needed.
+**Framebuffer:** The NWindow dimensions are set dynamically based on the
+current operation mode: **1280×720** in handheld mode and **1920×1080**
+when docked. `appletGetOperationMode()` is polled each frame via
+`platform_pump_events()`; on a mode change `nwindowSetDimensions()` and
+`system_resize()` are called immediately so the render resolution and
+projection matrices update without restarting the game. The Switch
+hardware compositor handles the final output to the TV.
 
 **Render pipeline:** The game renders to an offscreen FBO (render-to-texture),
 then blits it to the EGL surface via a fullscreen quad. This supports
@@ -276,6 +282,28 @@ post-effect modes (none, CRT scanline), all selectable in-game.
 textures. The CPU-side packing buffer is allocated from the hunk
 allocator temporarily during load and freed immediately after
 upload — it does not persist at runtime.
+
+**GLES2 compatibility shim (`render_gles2_compat.h`):** A force-included
+header translates desktop GL assumptions into strict GLES2 requirements:
+
+- `GL_RGB` FBO attachments redirected to `GL_RGBA` (GLES2 requires
+  `GL_RGBA` for color-renderable FBO textures)
+- `GL_LINEAR_MIPMAP_*` min filter modes downgraded to `GL_LINEAR` —
+  `RENDER_USE_MIPMAPS=1` is hardcoded upstream but `glGenerateMipmap`
+  crashes the Switch mesa nv50 blitter; without this fix the atlas
+  texture is mipmap-incomplete and returns black for all samples
+- `glGenerateMipmap` no-opped entirely
+- VAO emulation — `GL_OES_vertex_array_object` is not exposed in the
+  Switch SDK GLES2 headers; a minimal fake-VAO layer records attribute
+  indices at shader init time and replays the known `vertex_t` layout
+  on every `glBindVertexArray` call, correctly restoring per-shader
+  attribute state when switching between the game shader and post shader
+- Anisotropic filtering suppressed — `glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT)`
+  returns a safe 1.0 without making the real call (which generates
+  `GL_INVALID_VALUE` on Switch GLES2); `glTexParameterf` for anisotropy
+  is no-opped entirely
+- GLEW stubbed out — `glewInit()` and `glewExperimental` are no-ops;
+  the Switch SDK has no GLEW equivalent
 
 **Dock/undock transitions:** EGL surfaces and GL contexts survive a
 dock/undock event transparently via mesa-switch. The game loop continues
@@ -291,12 +319,13 @@ uninterrupted across mode changes.
 game's mix callback produces 44 100 Hz float samples; the platform layer
 resamples linearly to 48 kHz and converts to s16le each frame.
 
-**Buffering:** Two DMA buffers of 8 192 bytes each (~33 ms of audio per
-buffer) are allocated with `memalign(0x1000, …)` and pre-queued at
-initialisation. Each frame, `audoutWaitPlayFinish` blocks until the
-hardware finishes a buffer, then the mix callback fills it and it is
-requeued. This blocking approach matches the official switchbrew audio
-examples and prevents silent gaps under load.
+**Buffering:** Two DMA buffers of 8 192 bytes each (2048 samples at
+48 kHz) are allocated with `memalign(0x1000, …)` and pre-queued at
+initialisation. Each frame, `audoutGetReleasedAudioOutBuffer` polls
+non-blocking for a completed buffer; if one is available it is filled
+by the mix callback and requeued, otherwise audio is skipped for that
+frame. This non-blocking approach prevents the audio buffer from
+stalling the game loop.
 
 **Music streaming:** Background music is QOA-compressed (`.qoa` files).
 `fread` is called from the mix callback approximately every 3–4 frames
@@ -385,7 +414,6 @@ freed before gameplay begins.
 
 | Item | Notes |
 |---|---|
-| **Docked 1080p rendering** | Currently renders at 720p in both modes; hardware upscales when docked. Native 1080p is achievable by polling `appletGetOperationMode()` and calling `nwindowSetCrop()` + `system_resize()` per frame. |
 | **Rumble** | libnx exposes `hidSendVibrationValue()`; mapping it to ship collision events in `ship.c` would improve feel. |
 | **Touchscreen** | Not implemented. All input is button-based. |
 
