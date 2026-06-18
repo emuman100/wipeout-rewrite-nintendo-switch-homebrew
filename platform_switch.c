@@ -724,31 +724,21 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 
 void platform_pump_events(void) {
     /* Process applet messages from the OS.
-     * AppletMessage_OperationModeChanged fires exactly when the Switch is
-     * docked or undocked — event-driven rather than polling, and reliable
-     * for hbmenu-launched NROs unlike appletGetOperationMode().
-     * AppletMessage_Exit fires when the user presses the Home button. */
+     * We handle ExitRequest here but NOT OperationModeChanged.
+     * AppletMessage_OperationModeChanged fires before the OS mode register
+     * updates, so appletGetOperationMode() returns the wrong value when
+     * queried immediately after the message. It also fires twice per
+     * dock/undock event, causing double resize calls that corrupt audio.
+     *
+     * Instead, dock/undock is detected by per-frame polling below —
+     * the same approach used by the mgba Switch port. By the time the
+     * mode changes between frames the transition is complete and stable. */
     AppletMessage msg;
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
         switch (msg) {
             case AppletMessage_ExitRequest:
                 s_wants_exit = true;
                 break;
-
-            case AppletMessage_OperationModeChanged: {
-                /* Resize NWindow and call system_resize() to update the
-                 * viewport and FBOs. appletGetOperationMode() is called
-                 * here in direct response to the OS mode-change message,
-                 * which is when it returns the correct value. */
-                AppletOperationMode mode = appletGetOperationMode();
-                s_op_mode = mode;
-                vec2i_t new_size = screen_size_for_mode(mode);
-                nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
-                system_resize(new_size);
-                TRACE("dock/undock: mode=%d size=%dx%d", (int)mode, new_size.x, new_size.y);
-                break;
-            }
-
             default:
                 break;
         }
@@ -757,6 +747,18 @@ void platform_pump_events(void) {
     /* Check appletMainLoop() for any exit signal not caught above */
     if (!appletMainLoop()) {
         s_wants_exit = true;
+    }
+
+    /* Per-frame dock/undock detection — mirrors mgba Switch port.
+     * appletGetOperationMode() is reliable when polled every frame
+     * because the transition is complete by the time the mode changes. */
+    AppletOperationMode current_mode = appletGetOperationMode();
+    if (current_mode != s_op_mode) {
+        s_op_mode = current_mode;
+        vec2i_t new_size = screen_size_for_mode(current_mode);
+        nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
+        system_resize(new_size);
+        TRACE("dock/undock: mode=%d size=%dx%d", (int)current_mode, new_size.x, new_size.y);
     }
 
     /* Feed the input system */
