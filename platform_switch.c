@@ -11,7 +11,6 @@
  *   devkitPro devkitA64 r19+
  *   libnx 4.x
  *   switch-mesa / switch-libdrm (for EGL + OpenGL ES 2)
- *   switch-sdl2  (optional – see AUDIO section; audren path used by default)
  *   deko3d is NOT used; we rely on OpenGL ES 2 via EGL (mesa-switch)
  *
  * The wipeout-rewrite CMake flags to pair with this file:
@@ -229,12 +228,12 @@ static bool egl_init(void) {
     TRACE("egl_init: GL via static libGLESv2 link OK");
 
 
-    /* Enable vsync — matches upstream SDL platform (SDL_GL_SetSwapInterval(1))
-     * and confirmed working in ppsspp and gzdoom Switch ports.
-     * eglSwapBuffers blocks at 60Hz, pacing the main loop and allowing the
-     * CPU to idle between frames. game logic runs at 30fps via the delta-time
-     * accumulator in system_update — vsync does not affect game speed. */
-    eglSwapInterval(s_egl_display, 1);
+    /* Disable vsync — the game manages its own frame timing via the
+     * delta-time accumulator in system_update. eglSwapInterval(1) was
+     * tested but caused a perceptible framerate drop, likely due to
+     * mesa-switch blocking the swap at 30Hz rather than 60Hz.
+     * Reverted to 0 to restore correct gameplay speed. */
+    eglSwapInterval(s_egl_display, 0);
 
     /* Drain any stale GL errors generated during mesa initialisation.
      * ppsspp explicitly does this after glewInit() with the comment
