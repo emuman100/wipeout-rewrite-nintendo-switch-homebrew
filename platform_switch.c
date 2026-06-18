@@ -723,24 +723,45 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 /* ---- Input pump (called each frame by the main loop) ---- */
 
 void platform_pump_events(void) {
-    /* Check if the user requested exit via appletMainLoop */
-    if (!appletMainLoop()) {
-        s_wants_exit = true;
-        return;
+    /* Process applet messages from the OS.
+     * AppletMessage_OperationModeChanged fires exactly when the Switch is
+     * docked or undocked — event-driven rather than polling, and reliable
+     * for hbmenu-launched NROs unlike appletGetOperationMode().
+     * AppletMessage_Exit fires when the user presses the Home button. */
+    AppletMessage msg;
+    while (R_SUCCEEDED(appletGetMessage(&msg))) {
+        switch (msg) {
+            case AppletMessage_Exit:
+                s_wants_exit = true;
+                break;
+
+            case AppletMessage_OperationModeChanged: {
+                /* Resize NWindow, force EGL to acknowledge new dimensions,
+                 * then call system_resize() to update viewport and FBOs. */
+                AppletOperationMode mode = appletGetOperationMode();
+                s_op_mode = mode;
+                vec2i_t new_size = screen_size_for_mode(mode);
+                nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
+
+                /* Force EGL to read the new native window geometry */
+                EGLint egl_w = new_size.x, egl_h = new_size.y;
+                eglQuerySurface(s_egl_display, s_egl_surface, EGL_WIDTH,  &egl_w);
+                eglQuerySurface(s_egl_display, s_egl_surface, EGL_HEIGHT, &egl_h);
+
+                system_resize(new_size);
+                TRACE("dock/undock: mode=%d size=%dx%d egl=%dx%d",
+                      (int)mode, new_size.x, new_size.y, (int)egl_w, (int)egl_h);
+                break;
+            }
+
+            default:
+                break;
+        }
     }
 
-    /* Detect dock/undock transitions and resize the renderer accordingly.
-     * appletGetOperationMode() returns AppletOperationMode_Handheld (0)
-     * or AppletOperationMode_Console (1, docked). When the mode changes
-     * we update the NWindow dimensions and call system_resize() so the
-     * render resolution and projection matrices update immediately. */
-    AppletOperationMode current_mode = appletGetOperationMode();
-    if (current_mode != s_op_mode) {
-        s_op_mode = current_mode;
-        vec2i_t new_size = screen_size_for_mode(current_mode);
-        nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
-        system_resize(new_size);
-        TRACE("dock/undock: mode=%d size=%dx%d", (int)current_mode, new_size.x, new_size.y);
+    /* Check appletMainLoop() for any exit signal not caught above */
+    if (!appletMainLoop()) {
+        s_wants_exit = true;
     }
 
     /* Feed the input system */
