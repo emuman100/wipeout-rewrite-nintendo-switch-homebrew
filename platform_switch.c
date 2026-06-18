@@ -736,21 +736,16 @@ void platform_pump_events(void) {
                 break;
 
             case AppletMessage_OperationModeChanged: {
-                /* Resize NWindow, force EGL to acknowledge new dimensions,
-                 * then call system_resize() to update viewport and FBOs. */
+                /* Resize NWindow and call system_resize() to update the
+                 * viewport and FBOs. appletGetOperationMode() is called
+                 * here in direct response to the OS mode-change message,
+                 * which is when it returns the correct value. */
                 AppletOperationMode mode = appletGetOperationMode();
                 s_op_mode = mode;
                 vec2i_t new_size = screen_size_for_mode(mode);
                 nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
-
-                /* Force EGL to read the new native window geometry */
-                EGLint egl_w = new_size.x, egl_h = new_size.y;
-                eglQuerySurface(s_egl_display, s_egl_surface, EGL_WIDTH,  &egl_w);
-                eglQuerySurface(s_egl_display, s_egl_surface, EGL_HEIGHT, &egl_h);
-
                 system_resize(new_size);
-                TRACE("dock/undock: mode=%d size=%dx%d egl=%dx%d",
-                      (int)mode, new_size.x, new_size.y, (int)egl_w, (int)egl_h);
+                TRACE("dock/undock: mode=%d size=%dx%d", (int)mode, new_size.x, new_size.y);
                 break;
             }
 
