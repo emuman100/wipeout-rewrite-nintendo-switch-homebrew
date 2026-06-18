@@ -731,7 +731,7 @@ void platform_pump_events(void) {
     AppletMessage msg;
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
         switch (msg) {
-            case AppletMessage_Exit:
+            case AppletMessage_ExitRequest:
                 s_wants_exit = true;
                 break;
 
