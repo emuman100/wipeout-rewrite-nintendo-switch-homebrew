@@ -122,14 +122,50 @@ static bool s_wants_exit = false;
 #define SWITCH_W_DOCKED   1920
 #define SWITCH_H_DOCKED   1080
 
-/* Last known applet operation mode — compared each frame to detect dock/undock.
- * SDL2-switch uses the same appletGetOperationMode() polling approach. */
+/* Last known applet operation mode — compared in hook to detect dock/undock.
+ * appletGetOperationMode() returns the correct NEW mode when called from
+ * the appletHook callback, because libnx updates its cache before firing hooks.
+ * SDL2-switch uses appletGetOperationMode() polling; we use the hook which
+ * fires at the same point (inside appletMainLoop) but avoids the double-fire
+ * problem by comparing against stored mode and only acting on real changes. */
 static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
 
+/* Applet hook cookie */
+static AppletHookCookie s_applet_hook_cookie;
+
+/* Applet hook callback — fires from within appletMainLoop() after libnx has
+ * updated g_appletOperationMode. appletGetOperationMode() returns the correct
+ * new mode here. We compare against s_op_mode to debounce double-fires. */
 static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
     if (mode == AppletOperationMode_Console)
         return (vec2i_t){ SWITCH_W_DOCKED, SWITCH_H_DOCKED };
     return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
+}
+
+/* Forward declaration — defined after egl_init */
+static bool egl_resize_surface(vec2i_t new_size);
+
+/* Applet hook callback — fires from within appletMainLoop() after libnx has
+ * updated g_appletOperationMode. appletGetOperationMode() returns the correct
+ * new mode here. We compare against s_op_mode to debounce double-fires. */
+static void s_applet_hook_cb(AppletHookType hook, void *param) {
+    (void)param;
+    if (hook == AppletHookType_OnOperationMode) {
+        AppletOperationMode mode = appletGetOperationMode();
+        if (mode != s_op_mode) {
+            s_op_mode = mode;
+            vec2i_t new_size = screen_size_for_mode(mode);
+            TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
+                  (int)mode, new_size.x, new_size.y);
+            if (egl_resize_surface(new_size)) {
+                system_resize(new_size);
+                TRACE("dock/undock: resize complete");
+            } else {
+                TRACE("dock/undock: egl_resize_surface FAILED");
+            }
+        }
+    }
+}
 }
 
 /* Recreate the EGL surface at the new NWindow dimensions.
@@ -774,35 +810,21 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 /* ---- Input pump (called each frame by the main loop) ---- */
 
 void platform_pump_events(void) {
-    /* Process applet messages — handle exit request. */
-    AppletMessage msg;
-    while (R_SUCCEEDED(appletGetMessage(&msg))) {
-        if (msg == AppletMessage_ExitRequest)
-            s_wants_exit = true;
-    }
-
-    /* appletMainLoop() signals exit on Home button press. */
+    /* Process applet messages.
+     * AppletMessage_OperationModeChanged triggers libnx to update its cached
+     * g_appletOperationMode value, then fires our registered appletHook.
+     * The hook calls appletGetOperationMode() at that exact moment when the
+     * cache is fresh and correct. We handle dock/undock in the hook, not here.
+     * appletMainLoop() processes messages and fires hooks. */
     if (!appletMainLoop()) {
         s_wants_exit = true;
     }
 
-    /* Dock/undock detection via appletGetOperationMode() polling.
-     * This is exactly what SDL2-switch does in SWITCH_PumpEvents().
-     * On mode change we destroy and recreate the EGL surface — required
-     * because nwindowSetDimensions() cannot be called while EGL buffers
-     * are registered. SDL2-switch does the same in SWITCH_SetWindowSize(). */
-    AppletOperationMode current_mode = appletGetOperationMode();
-    if (current_mode != s_op_mode) {
-        s_op_mode = current_mode;
-        vec2i_t new_size = screen_size_for_mode(current_mode);
-        TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
-              (int)current_mode, new_size.x, new_size.y);
-        if (egl_resize_surface(new_size)) {
-            system_resize(new_size);
-            TRACE("dock/undock: resize complete");
-        } else {
-            TRACE("dock/undock: egl_resize_surface FAILED");
-        }
+    /* Also drain messages explicitly for ExitRequest */
+    AppletMessage msg;
+    while (R_SUCCEEDED(appletGetMessage(&msg))) {
+        if (msg == AppletMessage_ExitRequest)
+            s_wants_exit = true;
     }
 
     /* Feed the input system */
@@ -844,6 +866,11 @@ int main(int argc, char *argv[]) {
     s_op_mode = appletGetOperationMode();
     TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
           s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
+
+    /* Register hook for dock/undock detection.
+     * Fires from within appletMainLoop() after libnx updates its mode cache.
+     * appletGetOperationMode() returns the correct new mode at that point. */
+    appletHook(&s_applet_hook_cookie, s_applet_hook_cb, NULL);
 
     /* ---- EGL + GLES2 ---- */
     TRACE("egl_init: starting");
@@ -895,6 +922,7 @@ int main(int argc, char *argv[]) {
     system_cleanup();
     platform_video_cleanup();
     audio_cleanup();
+    appletUnhook(&s_applet_hook_cookie);
     psmExit();
     TRACE("cleanup: done");
     log_close();
