@@ -184,6 +184,13 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
  * nwindowSetDimensions cannot be called while buffers are registered,
  * so the surface must be destroyed first to release them. */
 static bool egl_resize_surface(vec2i_t new_size) {
+    /* Finish all pending GL work before tearing down the surface.
+     * This ensures mesa releases all GPU resources (renderbuffers, textures)
+     * associated with the current surface before destroying it. Without this,
+     * repeated surface recreations fragment GPU memory and cause
+     * GL_OUT_OF_MEMORY on st_renderbuffer_alloc_storage. */
+    glFinish();
+
     /* Detach current surface */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
