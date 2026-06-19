@@ -117,12 +117,12 @@ static bool s_wants_exit = false;
 #define SWITCH_W_DOCKED   1920
 #define SWITCH_H_DOCKED   1080
 
-/* Last known NWindow dimensions — used to detect dock/undock transitions.
- * nwindowGetDimensions() reads directly from the compositor-owned NWindow
- * struct. This is independent of the applet service layer, which is
- * unreliable for AppletType_SystemApplication launched from hbmenu.
- * When the Switch is docked/undocked the compositor updates the NWindow
- * dimensions, and nwindowGetDimensions() reflects this immediately. */
+/* Last known compositor-preferred NWindow dimensions.
+ * The NWindow struct contains default_width/default_height fields that the
+ * compositor updates during buffer queue exchange (inside eglSwapBuffers).
+ * When the Switch is docked/undocked the compositor signals its new preferred
+ * dimensions via these fields — independent of the applet service layer.
+ * We poll them in platform_end_frame after each swap. */
 static u32 s_nwindow_w = SWITCH_W_HANDHELD;
 static u32 s_nwindow_h = SWITCH_H_HANDHELD;
 
@@ -133,7 +133,7 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
     (void)param;
     (void)hook;
     /* Hook kept for potential future use; dock/undock handled via
-     * nwindowGetDimensions() polling in platform_pump_events(). */
+     * default_width/default_height polling in platform_end_frame(). */
 }
 
 /* Audio */
@@ -166,8 +166,8 @@ static bool egl_init(void) {
     TRACE("egl_init: nwindow OK");
 
     /* Set NWindow to max dimensions so the compositor can give us 1080p
-     * when docked. We then read back actual dimensions via nwindowGetDimensions
-     * after surface creation — the compositor sets the real size. */
+     * when docked. The compositor signals its preferred size via
+     * default_width/default_height after the first buffer exchange. */
     nwindowSetDimensions(s_nwindow, SWITCH_W_DOCKED, SWITCH_H_DOCKED);
 
     s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -232,15 +232,15 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: eglMakeCurrent OK");
 
-    /* Read actual NWindow dimensions from the compositor.
-     * This tells us the real surface size regardless of what we requested —
-     * if docked the compositor may give us 1920×1080, if handheld 1280×720. */
-    u32 nw_w = SWITCH_W_HANDHELD, nw_h = SWITCH_H_HANDHELD;
-    if (R_SUCCEEDED(nwindowGetDimensions(s_nwindow, &nw_w, &nw_h)) && nw_w > 0 && nw_h > 0) {
-        s_nwindow_w = nw_w;
-        s_nwindow_h = nw_h;
+    /* Read compositor-preferred dimensions from NWindow struct.
+     * default_width/default_height are set by the compositor during buffer
+     * queue exchange. At init they reflect the current dock state.
+     * After eglMakeCurrent the first dequeue has occurred so these are valid. */
+    if (s_nwindow->default_width > 0 && s_nwindow->default_height > 0) {
+        s_nwindow_w = s_nwindow->default_width;
+        s_nwindow_h = s_nwindow->default_height;
     }
-    TRACE("egl_init: nwindow dimensions %dx%d", (int)s_nwindow_w, (int)s_nwindow_h);
+    TRACE("egl_init: compositor preferred %dx%d", (int)s_nwindow_w, (int)s_nwindow_h);
 
     /* GL functions are resolved via static libGLESv2 link (confirmed correct
      * approach by ppsspp Switch port). render_init_gl_funcs() is a no-op. */
@@ -618,6 +618,21 @@ void platform_end_frame(void) {
         eglSwapBuffers(s_egl_display, s_egl_surface);
     }
 
+    /* Dock/undock detection: check compositor-preferred dimensions after swap.
+     * The NWindow default_width/default_height fields are updated by the
+     * compositor during buffer queue exchange inside eglSwapBuffers.
+     * When the Switch is docked/undocked the compositor signals its new
+     * preferred size here — independent of the applet service layer. */
+    u32 dw = s_nwindow->default_width;
+    u32 dh = s_nwindow->default_height;
+    if (dw > 0 && dh > 0 && (dw != s_nwindow_w || dh != s_nwindow_h)) {
+        s_nwindow_w = dw;
+        s_nwindow_h = dh;
+        nwindowSetDimensions(s_nwindow, dw, dh);
+        system_resize((vec2i_t){ (int)dw, (int)dh });
+        TRACE("dock/undock: compositor preferred %dx%d", (int)dw, (int)dh);
+    }
+
     /* Push audio for this frame */
     audio_update();
 }
@@ -755,23 +770,6 @@ void platform_pump_events(void) {
         s_wants_exit = true;
     }
 
-    /* Dock/undock detection via nwindowGetDimensions().
-     * This reads directly from the compositor-owned NWindow struct,
-     * bypassing the applet service layer which is unreliable for
-     * AppletType_SystemApplication launched from hbmenu. The compositor
-     * updates the NWindow dimensions when the Switch is docked/undocked,
-     * and nwindowGetDimensions() reflects this change immediately.
-     * No appletGetOperationMode() or appletHook needed. */
-    u32 nw_w = 0, nw_h = 0;
-    if (R_SUCCEEDED(nwindowGetDimensions(s_nwindow, &nw_w, &nw_h)) &&
-        nw_w > 0 && nw_h > 0 &&
-        (nw_w != s_nwindow_w || nw_h != s_nwindow_h)) {
-        s_nwindow_w = nw_w;
-        s_nwindow_h = nw_h;
-        system_resize((vec2i_t){ (int)nw_w, (int)nw_h });
-        TRACE("dock/undock: nwindow now %dx%d", (int)nw_w, (int)nw_h);
-    }
-
     /* Feed the input system */
     input_update();
 }
@@ -800,7 +798,7 @@ int main(int argc, char *argv[]) {
     TRACE("wipegame starting");
 
     /* Register applet hook — kept for future use; dock/undock is now
-     * detected via nwindowGetDimensions() in platform_pump_events(). */
+     * detected via NWindow default_width/default_height in platform_end_frame(). */
     appletHook(&s_applet_hook_cookie, s_applet_hook_cb, NULL);
 
     /* ---- EGL + GLES2 ---- */
