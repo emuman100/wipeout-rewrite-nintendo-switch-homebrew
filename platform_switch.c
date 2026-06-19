@@ -185,20 +185,27 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
  * so the surface must be destroyed first to release them. */
 static bool egl_resize_surface(vec2i_t new_size) {
     /* Finish all pending GL work before tearing down the surface.
-     * This ensures mesa releases all GPU resources (renderbuffers, textures)
-     * associated with the current surface before destroying it. Without this,
-     * repeated surface recreations fragment GPU memory and cause
-     * GL_OUT_OF_MEMORY on st_renderbuffer_alloc_storage. */
+     * This ensures mesa releases all GPU resources before we destroy it. */
     glFinish();
 
     /* Detach current surface */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
-    /* Destroy old surface — releases NWindow buffers */
+    /* Destroy old surface — this should release EGL's buffer queue connection */
     if (s_egl_surface != EGL_NO_SURFACE) {
         eglDestroySurface(s_egl_display, s_egl_surface);
         s_egl_surface = EGL_NO_SURFACE;
     }
+
+    /* Explicitly release the NWindow buffer queue connection.
+     * eglDestroySurface may not fully disconnect from the NWindow buffer queue,
+     * leaving GPU memory allocated. nwindowReleaseBuffers calls bqDisconnect
+     * which frees all GPU buffer allocations and resets the NWindow state.
+     * This prevents EGL_BAD_ALLOC on subsequent eglCreateWindowSurface calls. */
+    nwindowReleaseBuffers(s_nwindow);
+
+    /* Release EGL thread state to ensure all EGL resources are freed */
+    eglReleaseThread();
 
     /* Resize NWindow — now valid because buffers are released */
     nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
