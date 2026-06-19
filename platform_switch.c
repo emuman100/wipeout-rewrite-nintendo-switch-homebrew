@@ -85,16 +85,27 @@ int printf(const char *fmt, ...) {
 #include "mem.h"
 
 /*
- * Do not override __nx_applet_type here.
- * Testing whether mesa EGL works without AppletType_SystemApplication,
- * which would allow appletGetOperationMode() to return correct dock state.
- * AppletType_SystemApplication was originally required because mesa's
- * viCreateManagedLayer() call during eglInitialize() needs system-level
- * display layer access. If this works, appletGetOperationMode() polling
- * for dock/undock will function correctly as it does in SDL2-switch.
- * If it crashes with 2168-0002, restore AppletType_SystemApplication.
+ * Override the libnx applet type.
+ *
+ * mesa-switch calls viCreateManagedLayer() during eglInitialize() which
+ * requires SystemApplication-level display layer access rights.
+ *
+ * AppletType_SystemApplication is correct for both launch paths:
+ *   - "hold R" title override (AppletType_Application context)
+ *   - Normal hbmenu NRO launch
+ *
+ * AppletType_LibraryApplet was tried during development and caused
+ * 2168-0002 from the VI service regardless of launch method.
+ * AppletType_SystemApplication resolved this on hardware (session 6).
+ *
+ * Note: appletGetOperationMode() requires psmInitialize() to return
+ * correct dock state — without it, it always returns Handheld regardless
+ * of applet type. psmInitialize() is called in main() before egl_init().
+ *
+ * Note: appletLockExit() is deliberately NOT called — it also caused
+ * 2168-0002 in testing and is unnecessary for clean exit behaviour.
  */
-// u32 __nx_applet_type = AppletType_SystemApplication;
+u32 __nx_applet_type = AppletType_SystemApplication;
 
 static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
 static EGLContext s_egl_context = EGL_NO_CONTEXT;
@@ -824,6 +835,12 @@ int main(int argc, char *argv[]) {
     /* Sample initial operation mode for correct NWindow dimensions at launch.
      * SDL2-switch does the same: operationMode = appletGetOperationMode()
      * in SWITCH_CreateWindow() before setting NWindow dimensions. */
+    /* Initialise the Power State Manager service.
+     * SDL2-switch calls psmInitialize() in SWITCH_VideoInit() before
+     * querying appletGetOperationMode(). Without it, appletGetOperationMode()
+     * cannot read dock state and always returns Handheld. */
+    psmInitialize();
+
     s_op_mode = appletGetOperationMode();
     TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
           s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
@@ -878,6 +895,7 @@ int main(int argc, char *argv[]) {
     system_cleanup();
     platform_video_cleanup();
     audio_cleanup();
+    psmExit();
     TRACE("cleanup: done");
     log_close();
 
