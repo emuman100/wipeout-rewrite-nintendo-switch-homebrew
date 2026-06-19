@@ -177,33 +177,25 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
  * nwindowSetDimensions cannot be called while buffers are registered,
  * so the surface must be destroyed first to release them. */
 static bool egl_resize_surface(vec2i_t new_size) {
-    /* Finish all pending GL work before tearing down the surface.
-     * This ensures mesa releases all GPU resources before we destroy it. */
-    glFinish();
+    /* Mirror exactly what SDL2-switch does in SWITCH_SetWindowSize():
+     * eglMakeCurrent(NO_SURFACE) -> eglDestroySurface -> nwindowSetDimensions
+     * -> eglCreateWindowSurface -> eglMakeCurrent
+     * No glFinish, nwindowReleaseBuffers, or eglReleaseThread —
+     * SDL2-switch does none of these. */
 
     /* Detach current surface */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
-    /* Destroy old surface — this should release EGL's buffer queue connection */
+    /* Destroy old surface */
     if (s_egl_surface != EGL_NO_SURFACE) {
         eglDestroySurface(s_egl_display, s_egl_surface);
         s_egl_surface = EGL_NO_SURFACE;
     }
 
-    /* Explicitly release the NWindow buffer queue connection.
-     * eglDestroySurface may not fully disconnect from the NWindow buffer queue,
-     * leaving GPU memory allocated. nwindowReleaseBuffers calls bqDisconnect
-     * which frees all GPU buffer allocations and resets the NWindow state.
-     * This prevents EGL_BAD_ALLOC on subsequent eglCreateWindowSurface calls. */
-    nwindowReleaseBuffers(s_nwindow);
-
-    /* Release EGL thread state to ensure all EGL resources are freed */
-    eglReleaseThread();
-
-    /* Resize NWindow — now valid because buffers are released */
+    /* Resize NWindow */
     nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
 
-    /* Recreate surface at new dimensions */
+    /* Create new surface at new dimensions */
     s_egl_surface = eglCreateWindowSurface(s_egl_display, s_egl_config,
                                            (EGLNativeWindowType)s_nwindow, NULL);
     if (s_egl_surface == EGL_NO_SURFACE) {
@@ -216,10 +208,6 @@ static bool egl_resize_surface(vec2i_t new_size) {
         TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
         return false;
     }
-
-    /* Perform an initial swap to establish clean mesa surface state
-     * before the caller attempts any GL operations on the new surface. */
-    eglSwapBuffers(s_egl_display, s_egl_surface);
 
     /* Drain any stale GL errors from the surface recreation */
     { GLenum _e; int _n = 0;
