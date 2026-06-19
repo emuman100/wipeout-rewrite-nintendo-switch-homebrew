@@ -158,9 +158,6 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
-                /* Flush to let mesa settle the new surface state,
-                 * then resize the FBO and viewport. */
-                glFlush();
                 system_resize(new_size);
                 TRACE("dock/undock: resize complete %dx%d", new_size.x, new_size.y);
             } else {
@@ -207,14 +204,6 @@ static bool egl_resize_surface(vec2i_t new_size) {
     if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
         TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
         return false;
-    }
-
-    /* Drain any stale GL errors from the surface recreation */
-    { GLenum _e; int _n = 0;
-      while ((_e = glGetError()) != GL_NO_ERROR) {
-          TRACE("egl_resize_surface: draining stale GL error 0x%x", _e);
-          if (++_n > 16) break;
-      }
     }
 
     TRACE("egl_resize_surface: OK %dx%d", new_size.x, new_size.y);
