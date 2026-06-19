@@ -128,6 +128,28 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
 /* Last known applet operation mode — used to detect dock/undock transitions */
 static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
 
+/* Applet hook cookie — registered in main(), unregistered on cleanup */
+static AppletHookCookie s_applet_hook_cookie;
+
+/* Applet hook callback — fires from within appletMainLoop() after libnx
+ * has processed the event and updated internal state. This means
+ * appletGetOperationMode() returns the correct new mode here, unlike
+ * AppletMessage_OperationModeChanged which fires before the mode updates,
+ * and unlike per-frame polling which never fires for our applet type. */
+static void s_applet_hook_cb(AppletHookType hook, void *param) {
+    (void)param;
+    if (hook == AppletHookType_OnOperationMode) {
+        AppletOperationMode mode = appletGetOperationMode();
+        if (mode != s_op_mode) {
+            s_op_mode = mode;
+            vec2i_t new_size = screen_size_for_mode(mode);
+            nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
+            system_resize(new_size);
+            TRACE("dock/undock: hook mode=%d size=%dx%d", (int)mode, new_size.x, new_size.y);
+        }
+    }
+}
+
 /* Audio */
 static AudioOutBuffer s_audio_buffers[2];
 static u8 *s_audio_data[2];
@@ -724,15 +746,10 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 
 void platform_pump_events(void) {
     /* Process applet messages from the OS.
-     * We handle ExitRequest here but NOT OperationModeChanged.
-     * AppletMessage_OperationModeChanged fires before the OS mode register
-     * updates, so appletGetOperationMode() returns the wrong value when
-     * queried immediately after the message. It also fires twice per
-     * dock/undock event, causing double resize calls that corrupt audio.
-     *
-     * Instead, dock/undock is detected by per-frame polling below —
-     * the same approach used by the mgba Switch port. By the time the
-     * mode changes between frames the transition is complete and stable. */
+     * Dock/undock is handled by s_applet_hook_cb registered in main() —
+     * the hook fires from within appletMainLoop() after libnx has updated
+     * internal state, so appletGetOperationMode() is correct at that point.
+     * We only handle ExitRequest here as a belt-and-suspenders exit check. */
     AppletMessage msg;
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
         switch (msg) {
@@ -744,21 +761,11 @@ void platform_pump_events(void) {
         }
     }
 
-    /* Check appletMainLoop() for any exit signal not caught above */
+    /* appletMainLoop() processes messages and fires registered hooks
+     * (including s_applet_hook_cb for dock/undock). Also signals exit
+     * when the Home button is pressed. */
     if (!appletMainLoop()) {
         s_wants_exit = true;
-    }
-
-    /* Per-frame dock/undock detection — mirrors mgba Switch port.
-     * appletGetOperationMode() is reliable when polled every frame
-     * because the transition is complete by the time the mode changes. */
-    AppletOperationMode current_mode = appletGetOperationMode();
-    if (current_mode != s_op_mode) {
-        s_op_mode = current_mode;
-        vec2i_t new_size = screen_size_for_mode(current_mode);
-        nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
-        system_resize(new_size);
-        TRACE("dock/undock: mode=%d size=%dx%d", (int)current_mode, new_size.x, new_size.y);
     }
 
     /* Feed the input system */
@@ -793,6 +800,11 @@ int main(int argc, char *argv[]) {
     s_op_mode = appletGetOperationMode();
     TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
           s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
+
+    /* Register the applet hook for dock/undock detection.
+     * The hook fires from within appletMainLoop() after libnx has updated
+     * internal state — more reliable than polling or AppletMessage. */
+    appletHook(&s_applet_hook_cookie, s_applet_hook_cb, NULL);
 
     /* ---- EGL + GLES2 ---- */
     TRACE("egl_init: starting");
@@ -839,6 +851,9 @@ int main(int argc, char *argv[]) {
     TRACE("main loop exited");
 
     /* ---- Cleanup ---- */
+    /* Unregister applet hook before cleanup */
+    appletUnhook(&s_applet_hook_cookie);
+
     /* system_cleanup() calls render_cleanup() and input_cleanup(). */
     TRACE("cleanup: starting");
     system_cleanup();
