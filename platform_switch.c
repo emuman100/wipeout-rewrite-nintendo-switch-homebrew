@@ -111,43 +111,29 @@ static NWindow *s_nwindow = NULL;
 
 static bool s_wants_exit = false;
 
-/* Screen dimensions — docked mode uses 1920×1080, handheld uses 1280×720.
- * The Switch hardware compositor handles the actual scaling to TV output;
- * we set the NWindow dimensions and tell the game the logical render size. */
+/* Screen dimensions — docked mode uses 1920×1080, handheld uses 1280×720. */
 #define SWITCH_W_HANDHELD 1280
 #define SWITCH_H_HANDHELD  720
 #define SWITCH_W_DOCKED   1920
 #define SWITCH_H_DOCKED   1080
 
-static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
-    if (mode == AppletOperationMode_Console)
-        return (vec2i_t){ SWITCH_W_DOCKED, SWITCH_H_DOCKED };
-    return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
-}
+/* Last known NWindow dimensions — used to detect dock/undock transitions.
+ * nwindowGetDimensions() reads directly from the compositor-owned NWindow
+ * struct. This is independent of the applet service layer, which is
+ * unreliable for AppletType_SystemApplication launched from hbmenu.
+ * When the Switch is docked/undocked the compositor updates the NWindow
+ * dimensions, and nwindowGetDimensions() reflects this immediately. */
+static u32 s_nwindow_w = SWITCH_W_HANDHELD;
+static u32 s_nwindow_h = SWITCH_H_HANDHELD;
 
-/* Last known applet operation mode — used to detect dock/undock transitions */
-static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
-
-/* Applet hook cookie — registered in main(), unregistered on cleanup */
+/* Applet hook cookie — still registered for ExitRequest handling */
 static AppletHookCookie s_applet_hook_cookie;
 
-/* Applet hook callback — fires from within appletMainLoop() after libnx
- * has processed the event and updated internal state. This means
- * appletGetOperationMode() returns the correct new mode here, unlike
- * AppletMessage_OperationModeChanged which fires before the mode updates,
- * and unlike per-frame polling which never fires for our applet type. */
 static void s_applet_hook_cb(AppletHookType hook, void *param) {
     (void)param;
-    if (hook == AppletHookType_OnOperationMode) {
-        AppletOperationMode mode = appletGetOperationMode();
-        if (mode != s_op_mode) {
-            s_op_mode = mode;
-            vec2i_t new_size = screen_size_for_mode(mode);
-            nwindowSetDimensions(s_nwindow, new_size.x, new_size.y);
-            system_resize(new_size);
-            TRACE("dock/undock: hook mode=%d size=%dx%d", (int)mode, new_size.x, new_size.y);
-        }
-    }
+    (void)hook;
+    /* Hook kept for potential future use; dock/undock handled via
+     * nwindowGetDimensions() polling in platform_pump_events(). */
 }
 
 /* Audio */
@@ -179,8 +165,10 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: nwindow OK");
 
-    vec2i_t initial_size = screen_size_for_mode(s_op_mode);
-    nwindowSetDimensions(s_nwindow, initial_size.x, initial_size.y);
+    /* Set NWindow to max dimensions so the compositor can give us 1080p
+     * when docked. We then read back actual dimensions via nwindowGetDimensions
+     * after surface creation — the compositor sets the real size. */
+    nwindowSetDimensions(s_nwindow, SWITCH_W_DOCKED, SWITCH_H_DOCKED);
 
     s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (s_egl_display == EGL_NO_DISPLAY) {
@@ -243,6 +231,16 @@ static bool egl_init(void) {
         return false;
     }
     TRACE("egl_init: eglMakeCurrent OK");
+
+    /* Read actual NWindow dimensions from the compositor.
+     * This tells us the real surface size regardless of what we requested —
+     * if docked the compositor may give us 1920×1080, if handheld 1280×720. */
+    u32 nw_w = SWITCH_W_HANDHELD, nw_h = SWITCH_H_HANDHELD;
+    if (R_SUCCEEDED(nwindowGetDimensions(s_nwindow, &nw_w, &nw_h)) && nw_w > 0 && nw_h > 0) {
+        s_nwindow_w = nw_w;
+        s_nwindow_h = nw_h;
+    }
+    TRACE("egl_init: nwindow dimensions %dx%d", (int)s_nwindow_w, (int)s_nwindow_h);
 
     /* GL functions are resolved via static libGLESv2 link (confirmed correct
      * approach by ppsspp Switch port). render_init_gl_funcs() is a no-op. */
@@ -553,7 +551,7 @@ void platform_exit(void) {
 }
 
 vec2i_t platform_screen_size(void) {
-    return screen_size_for_mode(s_op_mode);
+    return (vec2i_t){ (int)s_nwindow_w, (int)s_nwindow_h };
 }
 
 double platform_now(void) {
@@ -745,27 +743,33 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 /* ---- Input pump (called each frame by the main loop) ---- */
 
 void platform_pump_events(void) {
-    /* Process applet messages from the OS.
-     * Dock/undock is handled by s_applet_hook_cb registered in main() —
-     * the hook fires from within appletMainLoop() after libnx has updated
-     * internal state, so appletGetOperationMode() is correct at that point.
-     * We only handle ExitRequest here as a belt-and-suspenders exit check. */
+    /* Process applet messages — handle exit request only. */
     AppletMessage msg;
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
-        switch (msg) {
-            case AppletMessage_ExitRequest:
-                s_wants_exit = true;
-                break;
-            default:
-                break;
-        }
+        if (msg == AppletMessage_ExitRequest)
+            s_wants_exit = true;
     }
 
-    /* appletMainLoop() processes messages and fires registered hooks
-     * (including s_applet_hook_cb for dock/undock). Also signals exit
-     * when the Home button is pressed. */
+    /* appletMainLoop() signals exit on Home button press. */
     if (!appletMainLoop()) {
         s_wants_exit = true;
+    }
+
+    /* Dock/undock detection via nwindowGetDimensions().
+     * This reads directly from the compositor-owned NWindow struct,
+     * bypassing the applet service layer which is unreliable for
+     * AppletType_SystemApplication launched from hbmenu. The compositor
+     * updates the NWindow dimensions when the Switch is docked/undocked,
+     * and nwindowGetDimensions() reflects this change immediately.
+     * No appletGetOperationMode() or appletHook needed. */
+    u32 nw_w = 0, nw_h = 0;
+    if (R_SUCCEEDED(nwindowGetDimensions(s_nwindow, &nw_w, &nw_h)) &&
+        nw_w > 0 && nw_h > 0 &&
+        (nw_w != s_nwindow_w || nw_h != s_nwindow_h)) {
+        s_nwindow_w = nw_w;
+        s_nwindow_h = nw_h;
+        system_resize((vec2i_t){ (int)nw_w, (int)nw_h });
+        TRACE("dock/undock: nwindow now %dx%d", (int)nw_w, (int)nw_h);
     }
 
     /* Feed the input system */
@@ -795,15 +799,8 @@ int main(int argc, char *argv[]) {
     log_open();
     TRACE("wipegame starting");
 
-    /* Sample the initial operation mode so platform_screen_size() returns
-     * the correct resolution before the first dock/undock event fires. */
-    s_op_mode = appletGetOperationMode();
-    TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
-          s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
-
-    /* Register the applet hook for dock/undock detection.
-     * The hook fires from within appletMainLoop() after libnx has updated
-     * internal state — more reliable than polling or AppletMessage. */
+    /* Register applet hook — kept for future use; dock/undock is now
+     * detected via nwindowGetDimensions() in platform_pump_events(). */
     appletHook(&s_applet_hook_cookie, s_applet_hook_cb, NULL);
 
     /* ---- EGL + GLES2 ---- */
