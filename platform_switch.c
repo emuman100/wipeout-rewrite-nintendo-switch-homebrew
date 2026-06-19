@@ -142,8 +142,14 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
     return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
 }
 
-/* Forward declaration — defined after egl_init */
-static bool egl_resize_surface(vec2i_t new_size);
+/* Cooldown frame counter after a resize — prevents rapid successive surface
+ * recreations that exhaust GPU memory. eglDestroySurface doesn't synchronously
+ * free GPU memory; the compositor releases it asynchronously after compositing
+ * a frame. Attempting a second 1080p surface allocation before the first is
+ * released causes EGL_BAD_ALLOC. The cooldown ensures at least one frame
+ * completes (and eglSwapBuffers runs) before another resize is allowed. */
+static int s_resize_cooldown = 0;
+#define RESIZE_COOLDOWN_FRAMES 3
 
 /* Applet hook callback — fires from within appletMainLoop() after libnx has
  * updated g_appletOperationMode. appletGetOperationMode() returns the correct
@@ -154,11 +160,17 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
         AppletOperationMode mode = appletGetOperationMode();
         if (mode != s_op_mode) {
             s_op_mode = mode;
+            if (s_resize_cooldown > 0) {
+                TRACE("dock/undock: mode=%d cooldown=%d — skipping resize",
+                      (int)mode, s_resize_cooldown);
+                return;
+            }
             vec2i_t new_size = screen_size_for_mode(mode);
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
                 system_resize(new_size);
+                s_resize_cooldown = RESIZE_COOLDOWN_FRAMES;
                 TRACE("dock/undock: resize complete %dx%d", new_size.x, new_size.y);
             } else {
                 TRACE("dock/undock: egl_resize_surface FAILED");
@@ -681,6 +693,10 @@ void platform_end_frame(void) {
     } else {
         eglSwapBuffers(s_egl_display, s_egl_surface);
     }
+
+    /* Decrement resize cooldown — allows next dock/undock resize after
+     * enough frames have swapped for the compositor to release old GPU memory */
+    if (s_resize_cooldown > 0) s_resize_cooldown--;
 
     /* Push audio for this frame */
     audio_update();
