@@ -148,6 +148,9 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
  * with the newly recreated EGL surface before its internal state is ready. */
 static vec2i_t s_pending_resize = { 0, 0 };
 
+/* Forward declaration — defined after egl_init */
+static bool egl_resize_surface(vec2i_t new_size);
+
 /* Applet hook callback — fires from within appletMainLoop() after libnx has
  * updated g_appletOperationMode. appletGetOperationMode() returns the correct
  * new mode here. We compare against s_op_mode to debounce double-fires. */
