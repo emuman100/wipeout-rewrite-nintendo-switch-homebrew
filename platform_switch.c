@@ -166,7 +166,6 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
         }
     }
 }
-}
 
 /* Recreate the EGL surface at the new NWindow dimensions.
  * SDL2-switch does exactly this in SWITCH_SetWindowSize():
