@@ -106,6 +106,7 @@ u32 __nx_applet_type = AppletType_SystemApplication;
 static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
 static EGLContext s_egl_context = EGL_NO_CONTEXT;
 static EGLSurface s_egl_surface = EGL_NO_SURFACE;
+static EGLConfig  s_egl_config  = NULL;
 
 static NWindow *s_nwindow = NULL;
 
@@ -117,23 +118,59 @@ static bool s_wants_exit = false;
 #define SWITCH_W_DOCKED   1920
 #define SWITCH_H_DOCKED   1080
 
-/* Last known compositor-preferred NWindow dimensions.
- * The NWindow struct contains default_width/default_height fields that the
- * compositor updates during buffer queue exchange (inside eglSwapBuffers).
- * When the Switch is docked/undocked the compositor signals its new preferred
- * dimensions via these fields — independent of the applet service layer.
- * We poll them in platform_end_frame after each swap. */
-static u32 s_nwindow_w = SWITCH_W_HANDHELD;
-static u32 s_nwindow_h = SWITCH_H_HANDHELD;
+/* Last known applet operation mode — compared each frame to detect dock/undock.
+ * SDL2-switch uses the same appletGetOperationMode() polling approach. */
+static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
 
-/* Applet hook cookie — still registered for ExitRequest handling */
-static AppletHookCookie s_applet_hook_cookie;
+static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
+    if (mode == AppletOperationMode_Console)
+        return (vec2i_t){ SWITCH_W_DOCKED, SWITCH_H_DOCKED };
+    return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
+}
 
-static void s_applet_hook_cb(AppletHookType hook, void *param) {
-    (void)param;
-    (void)hook;
-    /* Hook kept for potential future use; dock/undock handled via
-     * default_width/default_height polling in platform_end_frame(). */
+/* Recreate the EGL surface at the new NWindow dimensions.
+ * SDL2-switch does exactly this in SWITCH_SetWindowSize():
+ *   eglMakeCurrent(NO_SURFACE) → eglDestroySurface → nwindowSetDimensions
+ *   → eglCreateWindowSurface → eglMakeCurrent
+ * nwindowSetDimensions cannot be called while buffers are registered,
+ * so the surface must be destroyed first to release them. */
+static bool egl_resize_surface(vec2i_t new_size) {
+    /* Detach current surface */
+    eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+
+    /* Destroy old surface — releases NWindow buffers */
+    if (s_egl_surface != EGL_NO_SURFACE) {
+        eglDestroySurface(s_egl_display, s_egl_surface);
+        s_egl_surface = EGL_NO_SURFACE;
+    }
+
+    /* Resize NWindow — now valid because buffers are released */
+    nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
+
+    /* Recreate surface at new dimensions */
+    s_egl_surface = eglCreateWindowSurface(s_egl_display, s_egl_config,
+                                           (EGLNativeWindowType)s_nwindow, NULL);
+    if (s_egl_surface == EGL_NO_SURFACE) {
+        TRACE("egl_resize_surface: eglCreateWindowSurface failed (0x%x)", eglGetError());
+        return false;
+    }
+
+    /* Reattach context to new surface */
+    if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
+        TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
+        return false;
+    }
+
+    /* Drain any stale GL errors from the surface recreation */
+    { GLenum _e; int _n = 0;
+      while ((_e = glGetError()) != GL_NO_ERROR) {
+          TRACE("egl_resize_surface: draining stale GL error 0x%x", _e);
+          if (++_n > 16) break;
+      }
+    }
+
+    TRACE("egl_resize_surface: OK %dx%d", new_size.x, new_size.y);
+    return true;
 }
 
 /* Audio */
@@ -165,10 +202,9 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: nwindow OK");
 
-    /* Set NWindow to max dimensions so the compositor can give us 1080p
-     * when docked. The compositor signals its preferred size via
-     * default_width/default_height after the first buffer exchange. */
-    nwindowSetDimensions(s_nwindow, SWITCH_W_DOCKED, SWITCH_H_DOCKED);
+    /* Set NWindow dimensions based on current operation mode */
+    vec2i_t initial_size = screen_size_for_mode(s_op_mode);
+    nwindowSetDimensions(s_nwindow, (u32)initial_size.x, (u32)initial_size.y);
 
     s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (s_egl_display == EGL_NO_DISPLAY) {
@@ -205,6 +241,7 @@ static bool egl_init(void) {
         TRACE("egl_init: eglChooseConfig failed");
         return false;
     }
+    s_egl_config = config;
     TRACE("egl_init: eglChooseConfig OK");
 
     s_egl_surface = eglCreateWindowSurface(s_egl_display, config,
@@ -231,16 +268,6 @@ static bool egl_init(void) {
         return false;
     }
     TRACE("egl_init: eglMakeCurrent OK");
-
-    /* Read compositor-preferred dimensions from NWindow struct.
-     * default_width/default_height are set by the compositor during buffer
-     * queue exchange. At init they reflect the current dock state.
-     * After eglMakeCurrent the first dequeue has occurred so these are valid. */
-    if (s_nwindow->default_width > 0 && s_nwindow->default_height > 0) {
-        s_nwindow_w = s_nwindow->default_width;
-        s_nwindow_h = s_nwindow->default_height;
-    }
-    TRACE("egl_init: compositor preferred %dx%d", (int)s_nwindow_w, (int)s_nwindow_h);
 
     /* GL functions are resolved via static libGLESv2 link (confirmed correct
      * approach by ppsspp Switch port). render_init_gl_funcs() is a no-op. */
@@ -551,7 +578,7 @@ void platform_exit(void) {
 }
 
 vec2i_t platform_screen_size(void) {
-    return (vec2i_t){ (int)s_nwindow_w, (int)s_nwindow_h };
+    return screen_size_for_mode(s_op_mode);
 }
 
 double platform_now(void) {
@@ -616,21 +643,6 @@ void platform_end_frame(void) {
         frame_count++;
     } else {
         eglSwapBuffers(s_egl_display, s_egl_surface);
-    }
-
-    /* Dock/undock detection: check compositor-preferred dimensions after swap.
-     * The NWindow default_width/default_height fields are updated by the
-     * compositor during buffer queue exchange inside eglSwapBuffers.
-     * When the Switch is docked/undocked the compositor signals its new
-     * preferred size here — independent of the applet service layer. */
-    u32 dw = s_nwindow->default_width;
-    u32 dh = s_nwindow->default_height;
-    if (dw > 0 && dh > 0 && (dw != s_nwindow_w || dh != s_nwindow_h)) {
-        s_nwindow_w = dw;
-        s_nwindow_h = dh;
-        nwindowSetDimensions(s_nwindow, dw, dh);
-        system_resize((vec2i_t){ (int)dw, (int)dh });
-        TRACE("dock/undock: compositor preferred %dx%d", (int)dw, (int)dh);
     }
 
     /* Push audio for this frame */
@@ -758,7 +770,7 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 /* ---- Input pump (called each frame by the main loop) ---- */
 
 void platform_pump_events(void) {
-    /* Process applet messages — handle exit request only. */
+    /* Process applet messages — handle exit request. */
     AppletMessage msg;
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
         if (msg == AppletMessage_ExitRequest)
@@ -768,6 +780,25 @@ void platform_pump_events(void) {
     /* appletMainLoop() signals exit on Home button press. */
     if (!appletMainLoop()) {
         s_wants_exit = true;
+    }
+
+    /* Dock/undock detection via appletGetOperationMode() polling.
+     * This is exactly what SDL2-switch does in SWITCH_PumpEvents().
+     * On mode change we destroy and recreate the EGL surface — required
+     * because nwindowSetDimensions() cannot be called while EGL buffers
+     * are registered. SDL2-switch does the same in SWITCH_SetWindowSize(). */
+    AppletOperationMode current_mode = appletGetOperationMode();
+    if (current_mode != s_op_mode) {
+        s_op_mode = current_mode;
+        vec2i_t new_size = screen_size_for_mode(current_mode);
+        TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
+              (int)current_mode, new_size.x, new_size.y);
+        if (egl_resize_surface(new_size)) {
+            system_resize(new_size);
+            TRACE("dock/undock: resize complete");
+        } else {
+            TRACE("dock/undock: egl_resize_surface FAILED");
+        }
     }
 
     /* Feed the input system */
@@ -797,9 +828,12 @@ int main(int argc, char *argv[]) {
     log_open();
     TRACE("wipegame starting");
 
-    /* Register applet hook — kept for future use; dock/undock is now
-     * detected via NWindow default_width/default_height in platform_end_frame(). */
-    appletHook(&s_applet_hook_cookie, s_applet_hook_cb, NULL);
+    /* Sample initial operation mode for correct NWindow dimensions at launch.
+     * SDL2-switch does the same: operationMode = appletGetOperationMode()
+     * in SWITCH_CreateWindow() before setting NWindow dimensions. */
+    s_op_mode = appletGetOperationMode();
+    TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
+          s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
 
     /* ---- EGL + GLES2 ---- */
     TRACE("egl_init: starting");
@@ -846,9 +880,6 @@ int main(int argc, char *argv[]) {
     TRACE("main loop exited");
 
     /* ---- Cleanup ---- */
-    /* Unregister applet hook before cleanup */
-    appletUnhook(&s_applet_hook_cookie);
-
     /* system_cleanup() calls render_cleanup() and input_cleanup(). */
     TRACE("cleanup: starting");
     system_cleanup();
