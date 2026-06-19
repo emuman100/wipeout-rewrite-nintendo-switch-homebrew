@@ -142,8 +142,11 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
     return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
 }
 
-/* Forward declaration — defined after egl_init */
-static bool egl_resize_surface(vec2i_t new_size);
+/* Pending resize dimensions — set by the hook, applied after the next swap.
+ * Calling system_resize() immediately after egl_resize_surface() crashes mesa
+ * because st_update_renderbuffer_surface tries to reconcile the old renderbuffer
+ * with the newly recreated EGL surface before its internal state is ready. */
+static vec2i_t s_pending_resize = { 0, 0 };
 
 /* Applet hook callback — fires from within appletMainLoop() after libnx has
  * updated g_appletOperationMode. appletGetOperationMode() returns the correct
@@ -158,8 +161,12 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
-                system_resize(new_size);
-                TRACE("dock/undock: resize complete");
+                /* Defer system_resize() to platform_end_frame after the next
+                 * eglSwapBuffers — calling it here crashes mesa because
+                 * st_update_renderbuffer_surface cannot reconcile the old
+                 * renderbuffer state with the newly recreated EGL surface. */
+                s_pending_resize = new_size;
+                TRACE("dock/undock: EGL surface OK, resize deferred to next frame");
             } else {
                 TRACE("dock/undock: egl_resize_surface FAILED");
             }
@@ -682,6 +689,15 @@ void platform_end_frame(void) {
         frame_count++;
     } else {
         eglSwapBuffers(s_egl_display, s_egl_surface);
+    }
+
+    /* Apply deferred resize after swap — system_resize() calls glTexImage2D
+     * to resize FBO textures, which is safe only after eglSwapBuffers has
+     * let mesa fully establish the new surface state. */
+    if (s_pending_resize.x > 0 && s_pending_resize.y > 0) {
+        system_resize(s_pending_resize);
+        TRACE("dock/undock: system_resize %dx%d applied", s_pending_resize.x, s_pending_resize.y);
+        s_pending_resize = (vec2i_t){ 0, 0 };
     }
 
     /* Push audio for this frame */
