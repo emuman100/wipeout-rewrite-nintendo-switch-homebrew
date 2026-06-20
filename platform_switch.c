@@ -726,10 +726,6 @@ void platform_end_frame(void) {
     audio_update();
 }
 
-    /* Push audio for this frame */
-    audio_update();
-}
-
 /* ---- File I/O ---- */
 
 /*
