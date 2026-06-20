@@ -697,17 +697,6 @@ void platform_prepare_frame(void) {
 void platform_end_frame(void) {
     /* Apply deferred system_resize BEFORE eglSwapBuffers.
      * After egl_resize_surface the EGL context still has the old FBO bound.
-     * eglSwapBuffers tries to present the current framebuffer to the new
-     * EGL surface — if the FBO dimensions don't match the surface, mesa
-     * crashes in st_update_renderbuffer_surface. Resizing the FBO first
-     * ensures the framebuffer matches the new surface before the swap. */
-    if (s_pending_resize.x > 0 && s_pending_resize.y > 0) {
-        vec2i_t sz = s_pending_resize;
-        s_pending_resize = (vec2i_t){ 0, 0 };
-        system_resize(sz);
-        TRACE("dock/undock: system_resize %dx%d applied", sz.x, sz.y);
-    }
-
     /* Log GL errors and swap result for first few frames */
     static int frame_count = 0;
     if (frame_count < 5) {
@@ -725,6 +714,19 @@ void platform_end_frame(void) {
 
     /* Decrement resize cooldown */
     if (s_resize_cooldown > 0) s_resize_cooldown--;
+
+    /* Apply deferred system_resize AFTER eglSwapBuffers and only once the
+     * cooldown has counted down to 0 (meaning at least RESIZE_COOLDOWN_FRAMES
+     * swaps have completed since the surface recreate).
+     * Before that: mesa is not ready to resize the FBO on the new surface.
+     * After the cooldown: mesa has fully processed the new surface and it
+     * is safe to call glTexImage2D to resize the FBO. */
+    if (s_pending_resize.x > 0 && s_pending_resize.y > 0 && s_resize_cooldown == 0) {
+        vec2i_t sz = s_pending_resize;
+        s_pending_resize = (vec2i_t){ 0, 0 };
+        system_resize(sz);
+        TRACE("dock/undock: system_resize %dx%d applied", sz.x, sz.y);
+    }
 
     /* Push audio for this frame */
     audio_update();
