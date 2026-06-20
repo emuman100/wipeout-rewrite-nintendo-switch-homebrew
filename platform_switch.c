@@ -151,6 +151,13 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
 static int s_resize_cooldown = 0;
 #define RESIZE_COOLDOWN_FRAMES 3
 
+/* Pending resize — set by hook after EGL surface recreate, applied in
+ * platform_end_frame after eglSwapBuffers so mesa can settle first. */
+static vec2i_t s_pending_resize = { 0, 0 };
+
+/* Forward declaration — defined after egl_init */
+static bool egl_resize_surface(vec2i_t new_size);
+
 /* Applet hook callback — fires from within appletMainLoop() after libnx has
  * updated g_appletOperationMode. appletGetOperationMode() returns the correct
  * new mode here. We compare against s_op_mode to debounce double-fires. */
@@ -169,9 +176,15 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
-                system_resize(new_size);
+                /* Defer system_resize to platform_end_frame after the next
+                 * eglSwapBuffers. mesa lazily applies glTexImage2D changes
+                 * during st_glFlush which is triggered by the next swap.
+                 * Calling system_resize here means the lazy flush happens
+                 * during platform_end_frame, crashing in st_update_renderbuffer_surface.
+                 * Deferring until after that swap lets mesa settle first. */
+                s_pending_resize = new_size;
                 s_resize_cooldown = RESIZE_COOLDOWN_FRAMES;
-                TRACE("dock/undock: resize complete %dx%d", new_size.x, new_size.y);
+                TRACE("dock/undock: EGL surface OK, resize deferred");
             } else {
                 TRACE("dock/undock: egl_resize_surface FAILED");
             }
@@ -694,8 +707,20 @@ void platform_end_frame(void) {
         eglSwapBuffers(s_egl_display, s_egl_surface);
     }
 
-    /* Decrement resize cooldown — allows next dock/undock resize after
-     * enough frames have swapped for the compositor to release old GPU memory */
+    /* Apply deferred system_resize after eglSwapBuffers.
+     * mesa lazily applies glTexImage2D state during st_glFlush which is
+     * triggered by eglSwapBuffers. Calling system_resize before the swap
+     * causes the lazy flush to crash in st_update_renderbuffer_surface.
+     * After the swap, mesa has processed the new surface state and it
+     * is safe to resize the FBO and viewport. */
+    if (s_pending_resize.x > 0 && s_pending_resize.y > 0) {
+        vec2i_t sz = s_pending_resize;
+        s_pending_resize = (vec2i_t){ 0, 0 };
+        system_resize(sz);
+        TRACE("dock/undock: system_resize %dx%d applied", sz.x, sz.y);
+    }
+
+    /* Decrement resize cooldown */
     if (s_resize_cooldown > 0) s_resize_cooldown--;
 
     /* Push audio for this frame */
