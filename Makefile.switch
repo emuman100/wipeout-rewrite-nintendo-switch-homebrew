@@ -3,7 +3,7 @@
 #
 # Targets:
 #   make          – build wipegame.nro
-#   make clean    – remove build artefacts
+#   make clean    – remove build artifacts
 #
 # Prerequisites:
 #   devkitPro devkitA64 toolchain  (https://devkitpro.org/wiki/Getting_Started)
