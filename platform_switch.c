@@ -184,25 +184,31 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
  * nwindowSetDimensions cannot be called while buffers are registered,
  * so the surface must be destroyed first to release them. */
 static bool egl_resize_surface(vec2i_t new_size) {
-    /* Mirror exactly what SDL2-switch does in SWITCH_SetWindowSize():
-     * eglMakeCurrent(NO_SURFACE) -> eglDestroySurface -> nwindowSetDimensions
-     * -> eglCreateWindowSurface -> eglMakeCurrent
-     * No glFinish, nwindowReleaseBuffers, or eglReleaseThread —
-     * SDL2-switch does none of these. */
+    /* Confirmed sequence for mesa-switch dock/undock surface recreation.
+     * nwindowReleaseBuffers is required between eglDestroySurface and
+     * nwindowSetDimensions to force synchronous release of GPU buffer slots.
+     * Without it, the NWindow buffer cache accumulates across transitions
+     * until EGL_BAD_ALLOC on the 3rd 1080p allocation. eglDestroySurface
+     * alone drops EGL's references but the backing NV Map / GPU memory pages
+     * remain cached in the Horizon window compositor until nwindowReleaseBuffers
+     * calls into the IGraphicBufferProducer IPC layer to tear them down. */
 
-    /* Detach current surface */
+    /* 1. Unbind surface from context */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
-    /* Destroy old surface */
+    /* 2. Destroy EGL surface wrapper */
     if (s_egl_surface != EGL_NO_SURFACE) {
         eglDestroySurface(s_egl_display, s_egl_surface);
         s_egl_surface = EGL_NO_SURFACE;
     }
 
-    /* Resize NWindow */
+    /* 3. Force synchronous release of backing GPU buffer slots */
+    nwindowReleaseBuffers(s_nwindow);
+
+    /* 4. Set new NWindow dimensions */
     nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
 
-    /* Create new surface at new dimensions */
+    /* 5. Create new surface */
     s_egl_surface = eglCreateWindowSurface(s_egl_display, s_egl_config,
                                            (EGLNativeWindowType)s_nwindow, NULL);
     if (s_egl_surface == EGL_NO_SURFACE) {
@@ -210,7 +216,7 @@ static bool egl_resize_surface(vec2i_t new_size) {
         return false;
     }
 
-    /* Reattach context to new surface */
+    /* 6. Rebind context to new surface */
     if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
         TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
         return false;
