@@ -142,14 +142,12 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
     return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
 }
 
-/* Two-stage dock/undock flags matching SDL2 timing exactly:
+/* Two-stage dock/undock flags matching SDL2 timing:
  * Stage 1 — s_pending_surface: set by hook, consumed by platform_end_frame
  *            AFTER eglSwapBuffers. GPU is idle at that point so eglDestroySurface
  *            can fully release memory before eglCreateWindowSurface.
  * Stage 2 — s_pending_resize: set by platform_end_frame after successful surface
- *            recreation, consumed by platform_prepare_frame at start of next frame.
- *            Matches SDL2: NativeResized (GL FBO resize) fires at top of next frame
- *            after SWITCH_SetWindowSize. */
+ *            recreation, consumed by platform_prepare_frame at start of next frame. */
 static AppletOperationMode s_pending_surface = (AppletOperationMode)-1;
 static vec2i_t             s_pending_resize  = { 0, 0 };
 
@@ -157,12 +155,9 @@ static vec2i_t             s_pending_resize  = { 0, 0 };
 static bool egl_resize_surface(vec2i_t new_size);
 
 /* Applet hook callback — fires from within appletMainLoop() after libnx has
- * updated g_appletOperationMode. appletGetOperationMode() returns the correct
- * new mode here. We compare against s_op_mode to debounce double-fires.
- * Surface recreation is deferred to platform_end_frame — NOT done here.
- * Calling egl_resize_surface from within appletMainLoop IPC processing means
- * the GPU still has the current frame's commands pending, preventing mesa
- * from fully releasing the old surface's GPU memory on eglDestroySurface. */
+ * updated g_appletOperationMode. Only records the pending mode change.
+ * Surface recreation is deferred to platform_end_frame after eglSwapBuffers
+ * so the GPU is idle when eglDestroySurface is called. */
 static void s_applet_hook_cb(AppletHookType hook, void *param) {
     (void)param;
     if (hook == AppletHookType_OnOperationMode) {
@@ -184,33 +179,40 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
  * nwindowSetDimensions cannot be called while buffers are registered,
  * so the surface must be destroyed first to release them. */
 static bool egl_resize_surface(vec2i_t new_size) {
-    /* Gemini-confirmed sequence for mesa-switch 720p<->1080p transitions.
-     * Addresses both nvmap heap fragmentation and Mesa DRI2 slot caching. */
+    /* Correct sequence per libnx native_window.c source analysis:
+     *
+     * nwindowReleaseBuffers MUST be called BEFORE eglDestroySurface.
+     * It calls _nwindowDisconnect -> bqDisconnect while the binder session
+     * is still live (is_connected=true). This:
+     *   1. Frees GPU buffer slot allocations synchronously via IPC
+     *   2. Sets slots_configured=0, which nwindowSetDimensions requires
+     *
+     * If called AFTER eglDestroySurface, EGL has already called bqDisconnect
+     * internally, leaving the binder session torn down. nwindowReleaseBuffers
+     * then tries to call through an invalidated function pointer -> NULL crash.
+     *
+     * nwindowSetDimensions requires slots_configured==0:
+     *   if ((nw->width || nw->height) && nw->slots_configured)
+     *       return AlreadyInitialized;
+     * Only nwindowReleaseBuffers -> _nwindowDisconnect resets slots_configured. */
 
-    /* 1. Drain GPU pipeline completely while surface is still active.
-     * nouveau defers command buffer execution via its pushbuf pipeline.
-     * Commands referencing the old surface layout must complete before
-     * we destroy it, or eglSwapBuffers on the new surface will deref
-     * stale buffer pointers and crash at 0x0. */
-    glFinish();
-    eglWaitGL();
-
-    /* 2. Sever context attachment completely to force Mesa DRI2 cache drops */
+    /* 1. Detach surface from context */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
-    /* 3. Destroy old EGL surface wrapper */
+    /* 2. Release NWindow buffer slots BEFORE EGL destroys the surface.
+     *    Binder session is still live here — bqDisconnect succeeds. */
+    nwindowReleaseBuffers(s_nwindow);
+
+    /* 3. Destroy EGL surface — EGL cleans up after bqDisconnect already ran */
     if (s_egl_surface != EGL_NO_SURFACE) {
         eglDestroySurface(s_egl_display, s_egl_surface);
         s_egl_surface = EGL_NO_SURFACE;
     }
 
-    /* 4. Release compositor buffer slots and reset NWindow dimensions.
-     * nwindowReleaseBuffers frees the IGraphicBufferProducer slots
-     * synchronously, releasing nvmap GPU memory pages back to the system. */
-    nwindowReleaseBuffers(s_nwindow);
+    /* 4. Set new dimensions — safe now that slots_configured==0 */
     nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
 
-    /* 5. Create new surface at new dimensions */
+    /* 5. Create new surface */
     s_egl_surface = eglCreateWindowSurface(s_egl_display, s_egl_config,
                                            (EGLNativeWindowType)s_nwindow, NULL);
     if (s_egl_surface == EGL_NO_SURFACE) {
@@ -218,23 +220,11 @@ static bool egl_resize_surface(vec2i_t new_size) {
         return false;
     }
 
-    /* 6. Rebind context to new surface */
+    /* 6. Reattach context to new surface */
     if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
         TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
         return false;
     }
-
-    /* 7. Force GL state refresh — Mesa caches viewport/scissor/FBO state
-     * internally and may retain stale slot indices from the old resolution */
-    glViewport(0, 0, new_size.x, new_size.y);
-    glScissor(0, 0, new_size.x, new_size.y);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    /* 8. Clear new surface and swap once to finalize physical buffer
-     * attachments before the render loop resumes */
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-    eglSwapBuffers(s_egl_display, s_egl_surface);
 
     TRACE("egl_resize_surface: OK %dx%d", new_size.x, new_size.y);
     return true;
@@ -679,10 +669,11 @@ void platform_video_cleanup(void) {
 }
 
 void platform_prepare_frame(void) {
-    /* Apply system_resize at the start of the frame, after surface recreation
-     * completed in the previous platform_end_frame. This matches SDL2 timing:
-     * NativeResized (which triggers GL FBO resize) is called from the app's
-     * event loop at the top of the next frame after SWITCH_SetWindowSize. */
+    /* Apply deferred system_resize at the start of the frame, before rendering.
+     * This matches SDL2-switch behaviour: NativeResized() is called from the
+     * application's event loop at the start of the frame (after surface recreate,
+     * before render, before eglSwapBuffers). The cooldown ensures we wait for
+     * enough swaps after the surface recreate before mesa is ready for FBO ops. */
     if (s_pending_resize.x > 0 && s_pending_resize.y > 0) {
         vec2i_t sz = s_pending_resize;
         s_pending_resize = (vec2i_t){ 0, 0 };
@@ -723,11 +714,9 @@ void platform_end_frame(void) {
         eglSwapBuffers(s_egl_display, s_egl_surface);
     }
 
-    /* After eglSwapBuffers the GPU is idle — all pending commands complete,
-     * the previous surface's memory is fully releasable. This is the correct
-     * time to recreate the EGL surface, matching SDL2's timing exactly:
-     * SWITCH_PumpEvents fires at the top of each frame AFTER the previous
-     * swap completed, giving eglDestroySurface a clean GPU state to work with. */
+    /* After eglSwapBuffers the GPU is idle — safe to recreate EGL surface.
+     * This matches SDL2 timing: SWITCH_PumpEvents fires after previous swap
+     * completed, so eglDestroySurface has a clean GPU state to release memory. */
     if (s_pending_surface != (AppletOperationMode)-1) {
         vec2i_t new_size = screen_size_for_mode(s_pending_surface);
         TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface (post-swap)",
