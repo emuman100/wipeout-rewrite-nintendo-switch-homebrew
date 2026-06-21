@@ -178,16 +178,15 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
-                /* Present one blank frame on the new surface immediately after
-                 * recreation. SDL2 apps achieve this via their normal render
-                 * loop — the first eglSwapBuffers after SWITCH_SetWindowSize
-                 * commits and clears the new surface's GPU memory, preventing
-                 * accumulation of unreleased allocations across transitions.
-                 * We replicate that here explicitly since our hook fires outside
-                 * the normal render loop. Screen is already black during a
-                 * dock/undock transition so this frame is never visible. */
-                eglSwapBuffers(s_egl_display, s_egl_surface);
-                TRACE("dock/undock: initial swap done — GPU memory cleared");
+                /* Defer system_resize to platform_prepare_frame at the start
+                 * of the next frame after the cooldown expires, before rendering.
+                 * This matches SDL2 timing: the first eglSwapBuffers on the new
+                 * surface happens naturally in platform_end_frame on the next
+                 * frame — equivalent to SDL2's render loop swap after
+                 * SWITCH_SetWindowSize returns. No explicit swap here — calling
+                 * eglSwapBuffers from inside the applet hook (which fires within
+                 * appletMainLoop IPC processing) conflicts with compositor IPC
+                 * and causes crashes. */
                 s_pending_resize = new_size;
                 s_resize_cooldown = RESIZE_COOLDOWN_FRAMES;
                 TRACE("dock/undock: EGL surface OK, resize deferred");
