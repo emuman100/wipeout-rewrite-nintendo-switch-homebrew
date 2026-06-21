@@ -177,15 +177,15 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
     }
 }
 
-/* Recreate the EGL surface at the new NWindow dimensions.
- * SDL2-switch does exactly this in SWITCH_SetWindowSize():
- *   eglMakeCurrent(NO_SURFACE) → eglDestroySurface → nwindowSetDimensions
- *   → eglCreateWindowSurface → eglMakeCurrent
- * nwindowSetDimensions cannot be called while buffers are registered,
- * so the surface must be destroyed first to release them. */
+/* Recreate the EGL surface at the new NWindow dimensions, forcing full GPU
+ * memory release via eglTerminate + eglInitialize between transitions.
+ * See function body for full rationale. */
 static bool egl_resize_surface(vec2i_t new_size) {
-    /* Detach current surface */
-    eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    /* Detach surface but keep context current.
+     * eglMakeCurrent with NO_SURFACE but a valid context keeps the GL context
+     * active and preserves all GL state (shaders, textures, VBOs).
+     * Per EGL spec, a current context is NOT destroyed by eglTerminate. */
+    eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, s_egl_context);
 
     /* Destroy old surface */
     if (s_egl_surface != EGL_NO_SURFACE) {
@@ -193,10 +193,31 @@ static bool egl_resize_surface(vec2i_t new_size) {
         s_egl_surface = EGL_NO_SURFACE;
     }
 
-    /* Resize NWindow */
+    /* Force GPU memory release via eglTerminate + eglInitialize.
+     * eglDestroySurface alone does not synchronously free GPU buffer
+     * allocations — mesa holds them until the next composition cycle.
+     * After multiple 720p<->1080p transitions this accumulates until
+     * eglCreateWindowSurface fails with EGL_BAD_ALLOC.
+     *
+     * eglTerminate forces mesa to release ALL non-current EGL resources.
+     * The GL context survives because it is still current (eglMakeCurrent
+     * above used NO_SURFACE but kept s_egl_context current). GL state —
+     * shaders, textures, VBOs — is fully preserved in the context.
+     * eglInitialize then reactivates the display cleanly.
+     *
+     * This is the ppsspp EGL_Close/EGL_Init pattern, adapted to preserve
+     * the GL context across the terminate/reinitialize cycle. */
+    eglTerminate(s_egl_display);
+    EGLint major, minor;
+    if (!eglInitialize(s_egl_display, &major, &minor)) {
+        TRACE("egl_resize_surface: eglInitialize failed (0x%x)", eglGetError());
+        return false;
+    }
+
+    /* Resize NWindow — safe now that EGL has fully released its buffers */
     nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
 
-    /* Create new surface at new dimensions */
+    /* Create new surface into the now-clean GPU budget */
     s_egl_surface = eglCreateWindowSurface(s_egl_display, s_egl_config,
                                            (EGLNativeWindowType)s_nwindow, NULL);
     if (s_egl_surface == EGL_NO_SURFACE) {
@@ -204,7 +225,7 @@ static bool egl_resize_surface(vec2i_t new_size) {
         return false;
     }
 
-    /* Reattach context to new surface */
+    /* Reattach context to new surface — GL state intact */
     if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
         TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
         return false;
