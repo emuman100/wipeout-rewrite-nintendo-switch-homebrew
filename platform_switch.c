@@ -178,10 +178,22 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
-                /* Defer system_resize to platform_prepare_frame at the start
-                 * of the next frame after the cooldown expires, before rendering.
-                 * This matches SDL2 timing: NativeResized runs after surface
-                 * recreate but before render and before eglSwapBuffers. */
+                /* Present one blank frame on the new surface immediately after
+                 * recreation. This is the key step missing from previous attempts:
+                 * eglDestroySurface marks GPU buffers for release but does not
+                 * synchronously free them. Without a swap, each transition
+                 * accumulates unreleased GPU allocations until EGL_BAD_ALLOC
+                 * on the 3rd+ transition. One eglSwapBuffers forces the
+                 * compositor to commit and clear the new surface's GPU memory,
+                 * making it fully usable and releasing the previous allocation.
+                 * The screen is already black during a dock/undock transition
+                 * so this blank frame is never visible to the user. */
+                eglSwapBuffers(s_egl_display, s_egl_surface);
+                TRACE("dock/undock: initial swap done — GPU memory cleared");
+
+                /* Now defer system_resize to platform_prepare_frame.
+                 * At that point the new surface is fully established and
+                 * mesa's lazy allocator has clean GPU memory to work with. */
                 s_pending_resize = new_size;
                 s_resize_cooldown = RESIZE_COOLDOWN_FRAMES;
                 TRACE("dock/undock: EGL surface OK, resize deferred");
