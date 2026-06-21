@@ -142,12 +142,16 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
     return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
 }
 
-/* s_pending_mode — set by hook when dock state changes, processed in
- * platform_end_frame AFTER eglSwapBuffers completes (GPU idle).
- * This matches SDL2 timing: SWITCH_PumpEvents fires at the top of each
- * frame AFTER the previous swap completed, so eglDestroySurface is called
- * with the GPU idle and mesa can fully release surface GPU memory. */
-static AppletOperationMode s_pending_mode = (AppletOperationMode)-1;
+/* Two-stage dock/undock flags matching SDL2 timing exactly:
+ * Stage 1 — s_pending_surface: set by hook, consumed by platform_end_frame
+ *            AFTER eglSwapBuffers. GPU is idle at that point so eglDestroySurface
+ *            can fully release memory before eglCreateWindowSurface.
+ * Stage 2 — s_pending_resize: set by platform_end_frame after successful surface
+ *            recreation, consumed by platform_prepare_frame at start of next frame.
+ *            Matches SDL2: NativeResized (GL FBO resize) fires at top of next frame
+ *            after SWITCH_SetWindowSize. */
+static AppletOperationMode s_pending_surface = (AppletOperationMode)-1;
+static vec2i_t             s_pending_resize  = { 0, 0 };
 
 /* Forward declaration */
 static bool egl_resize_surface(vec2i_t new_size);
@@ -165,7 +169,7 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
         AppletOperationMode mode = appletGetOperationMode();
         if (mode != s_op_mode) {
             s_op_mode = mode;
-            s_pending_mode = mode;
+            s_pending_surface = mode;
             vec2i_t new_size = screen_size_for_mode(mode);
             TRACE("dock/undock: mode=%d size=%dx%d — queued for end of frame",
                   (int)mode, new_size.x, new_size.y);
@@ -659,9 +663,9 @@ void platform_prepare_frame(void) {
      * completed in the previous platform_end_frame. This matches SDL2 timing:
      * NativeResized (which triggers GL FBO resize) is called from the app's
      * event loop at the top of the next frame after SWITCH_SetWindowSize. */
-    if (s_pending_mode != (AppletOperationMode)-1) {
-        vec2i_t sz = screen_size_for_mode(s_pending_mode);
-        s_pending_mode = (AppletOperationMode)-1;
+    if (s_pending_resize.x > 0 && s_pending_resize.y > 0) {
+        vec2i_t sz = s_pending_resize;
+        s_pending_resize = (vec2i_t){ 0, 0 };
         system_resize(sz);
         TRACE("dock/undock: system_resize %dx%d applied", sz.x, sz.y);
     }
@@ -704,16 +708,16 @@ void platform_end_frame(void) {
      * time to recreate the EGL surface, matching SDL2's timing exactly:
      * SWITCH_PumpEvents fires at the top of each frame AFTER the previous
      * swap completed, giving eglDestroySurface a clean GPU state to work with. */
-    if (s_pending_mode != (AppletOperationMode)-1) {
-        vec2i_t new_size = screen_size_for_mode(s_pending_mode);
+    if (s_pending_surface != (AppletOperationMode)-1) {
+        vec2i_t new_size = screen_size_for_mode(s_pending_surface);
         TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface (post-swap)",
-              (int)s_pending_mode, new_size.x, new_size.y);
-        if (!egl_resize_surface(new_size)) {
+              (int)s_pending_surface, new_size.x, new_size.y);
+        if (egl_resize_surface(new_size)) {
+            s_pending_resize = new_size;
+        } else {
             TRACE("dock/undock: egl_resize_surface FAILED");
-            s_pending_mode = (AppletOperationMode)-1;
         }
-        /* s_pending_mode stays set — consumed by platform_prepare_frame
-         * at the start of the next frame to apply system_resize. */
+        s_pending_surface = (AppletOperationMode)-1;
     }
 
     /* Push audio for this frame */
