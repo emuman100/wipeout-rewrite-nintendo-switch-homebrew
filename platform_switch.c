@@ -178,22 +178,10 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
-                /* Present one blank frame on the new surface immediately after
-                 * recreation. This is the key step missing from previous attempts:
-                 * eglDestroySurface marks GPU buffers for release but does not
-                 * synchronously free them. Without a swap, each transition
-                 * accumulates unreleased GPU allocations until EGL_BAD_ALLOC
-                 * on the 3rd+ transition. One eglSwapBuffers forces the
-                 * compositor to commit and clear the new surface's GPU memory,
-                 * making it fully usable and releasing the previous allocation.
-                 * The screen is already black during a dock/undock transition
-                 * so this blank frame is never visible to the user. */
-                eglSwapBuffers(s_egl_display, s_egl_surface);
-                TRACE("dock/undock: initial swap done — GPU memory cleared");
-
-                /* Now defer system_resize to platform_prepare_frame.
-                 * At that point the new surface is fully established and
-                 * mesa's lazy allocator has clean GPU memory to work with. */
+                /* Defer system_resize to platform_prepare_frame at the start
+                 * of the next frame after the cooldown expires, before rendering.
+                 * This matches SDL2 timing: NativeResized runs after surface
+                 * recreate but before render and before eglSwapBuffers. */
                 s_pending_resize = new_size;
                 s_resize_cooldown = RESIZE_COOLDOWN_FRAMES;
                 TRACE("dock/undock: EGL surface OK, resize deferred");
@@ -211,12 +199,6 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
  * nwindowSetDimensions cannot be called while buffers are registered,
  * so the surface must be destroyed first to release them. */
 static bool egl_resize_surface(vec2i_t new_size) {
-    /* Mirror exactly what SDL2-switch does in SWITCH_SetWindowSize():
-     * eglMakeCurrent(NO_SURFACE) -> eglDestroySurface -> nwindowSetDimensions
-     * -> eglCreateWindowSurface -> eglMakeCurrent
-     * No glFinish, nwindowReleaseBuffers, or eglReleaseThread —
-     * SDL2-switch does none of these. */
-
     /* Detach current surface */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
@@ -225,6 +207,17 @@ static bool egl_resize_surface(vec2i_t new_size) {
         eglDestroySurface(s_egl_display, s_egl_surface);
         s_egl_surface = EGL_NO_SURFACE;
     }
+
+    /* Force synchronous release of GPU buffer allocations.
+     * eglDestroySurface marks buffers for release but does not call
+     * bqDisconnect — the compositor holds the GPU allocations until the
+     * next composition cycle. On repeated 720p<->1080p transitions this
+     * accumulates ~16MB per cycle until eglCreateWindowSurface fails with
+     * EGL_BAD_ALLOC on the 3rd attempt.
+     * nwindowReleaseBuffers calls bqDisconnect which forces the compositor
+     * to release all queued buffer allocations synchronously, making the
+     * full GPU budget available for the new surface. */
+    nwindowReleaseBuffers(s_nwindow);
 
     /* Resize NWindow */
     nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
