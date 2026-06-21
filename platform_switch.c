@@ -142,19 +142,8 @@ static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
     return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
 }
 
-/* Cooldown frame counter after a resize — prevents rapid successive surface
- * recreations that exhaust GPU memory. eglDestroySurface doesn't synchronously
- * free GPU memory; the compositor releases it asynchronously after compositing
- * a frame. Attempting a second 1080p surface allocation before the first is
- * released causes EGL_BAD_ALLOC. The cooldown ensures at least one frame
- * completes (and eglSwapBuffers runs) before another resize is allowed. */
-static int s_resize_cooldown = 0;
-#define RESIZE_COOLDOWN_FRAMES 3
-
-/* Pending resize — set by hook after EGL surface recreate, applied in
- * platform_end_frame BEFORE eglSwapBuffers. The FBO must match the new
- * EGL surface dimensions before the swap, or mesa crashes trying to
- * present an incompatible framebuffer to the new surface. */
+/* s_pending_resize — set by hook after EGL surface recreate, applied in
+ * platform_end_frame before eglSwapBuffers. */
 static vec2i_t s_pending_resize = { 0, 0 };
 
 /* Forward declaration — defined after egl_init */
@@ -169,27 +158,18 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
         AppletOperationMode mode = appletGetOperationMode();
         if (mode != s_op_mode) {
             s_op_mode = mode;
-            if (s_resize_cooldown > 0) {
-                TRACE("dock/undock: mode=%d cooldown=%d — skipping resize",
-                      (int)mode, s_resize_cooldown);
-                return;
-            }
             vec2i_t new_size = screen_size_for_mode(mode);
             TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface",
                   (int)mode, new_size.x, new_size.y);
             if (egl_resize_surface(new_size)) {
-                /* Defer system_resize to platform_prepare_frame at the start
-                 * of the next frame after the cooldown expires, before rendering.
-                 * This matches SDL2 timing: the first eglSwapBuffers on the new
-                 * surface happens naturally in platform_end_frame on the next
-                 * frame — equivalent to SDL2's render loop swap after
-                 * SWITCH_SetWindowSize returns. No explicit swap here — calling
-                 * eglSwapBuffers from inside the applet hook (which fires within
-                 * appletMainLoop IPC processing) conflicts with compositor IPC
-                 * and causes crashes. */
+                /* Defer system_resize to platform_end_frame, before eglSwapBuffers.
+                 * This matches ppsspp/SDL2 timing:
+                 *   render() completes → Resize() GL FBO ops → SwapBuffers()
+                 * No explicit swap here — eglSwapBuffers inside the applet hook
+                 * (which fires within appletMainLoop IPC processing) conflicts
+                 * with compositor IPC and causes crashes. */
                 s_pending_resize = new_size;
-                s_resize_cooldown = RESIZE_COOLDOWN_FRAMES;
-                TRACE("dock/undock: EGL surface OK, resize deferred");
+                TRACE("dock/undock: EGL surface OK, resize deferred to end of frame");
             } else {
                 TRACE("dock/undock: egl_resize_surface FAILED");
             }
@@ -673,18 +653,6 @@ void platform_video_cleanup(void) {
 }
 
 void platform_prepare_frame(void) {
-    /* Apply deferred system_resize at the start of the frame, before rendering.
-     * This matches SDL2-switch behaviour: NativeResized() is called from the
-     * application's event loop at the start of the frame (after surface recreate,
-     * before render, before eglSwapBuffers). The cooldown ensures we wait for
-     * enough swaps after the surface recreate before mesa is ready for FBO ops. */
-    if (s_pending_resize.x > 0 && s_pending_resize.y > 0 && s_resize_cooldown == 0) {
-        vec2i_t sz = s_pending_resize;
-        s_pending_resize = (vec2i_t){ 0, 0 };
-        system_resize(sz);
-        TRACE("dock/undock: system_resize %dx%d applied", sz.x, sz.y);
-    }
-
     static int prep_count = 0;
     if (prep_count < 3) {
         /* Query whatever FBO is currently bound (set by render_frame_prepare) */
@@ -703,6 +671,20 @@ void platform_prepare_frame(void) {
 }
 
 void platform_end_frame(void) {
+    /* Apply deferred system_resize BEFORE eglSwapBuffers.
+     * This matches ppsspp/SDL2 timing exactly:
+     *   render() completes → graphicsContext->Resize() (GL FBO ops) → SwapBuffers()
+     * The GL FBO resize and the first swap on the new surface happen together
+     * in one flush — mesa processes the FBO allocation with a fully established
+     * surface. No cooldown needed: the only constraint is that system_resize
+     * runs after render completes and before the swap. */
+    if (s_pending_resize.x > 0 && s_pending_resize.y > 0) {
+        vec2i_t sz = s_pending_resize;
+        s_pending_resize = (vec2i_t){ 0, 0 };
+        system_resize(sz);
+        TRACE("dock/undock: system_resize %dx%d applied", sz.x, sz.y);
+    }
+
     /* Log GL errors and swap result for first few frames */
     static int frame_count = 0;
     if (frame_count < 5) {
@@ -717,9 +699,6 @@ void platform_end_frame(void) {
     } else {
         eglSwapBuffers(s_egl_display, s_egl_surface);
     }
-
-    /* Decrement resize cooldown */
-    if (s_resize_cooldown > 0) s_resize_cooldown--;
 
     /* Push audio for this frame */
     audio_update();
