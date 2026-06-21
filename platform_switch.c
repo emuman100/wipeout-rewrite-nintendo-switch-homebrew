@@ -184,31 +184,33 @@ static void s_applet_hook_cb(AppletHookType hook, void *param) {
  * nwindowSetDimensions cannot be called while buffers are registered,
  * so the surface must be destroyed first to release them. */
 static bool egl_resize_surface(vec2i_t new_size) {
-    /* Confirmed sequence for mesa-switch dock/undock surface recreation.
-     * nwindowReleaseBuffers is required between eglDestroySurface and
-     * nwindowSetDimensions to force synchronous release of GPU buffer slots.
-     * Without it, the NWindow buffer cache accumulates across transitions
-     * until EGL_BAD_ALLOC on the 3rd 1080p allocation. eglDestroySurface
-     * alone drops EGL's references but the backing NV Map / GPU memory pages
-     * remain cached in the Horizon window compositor until nwindowReleaseBuffers
-     * calls into the IGraphicBufferProducer IPC layer to tear them down. */
+    /* Gemini-confirmed sequence for mesa-switch 720p<->1080p transitions.
+     * Addresses both nvmap heap fragmentation and Mesa DRI2 slot caching. */
 
-    /* 1. Unbind surface from context */
+    /* 1. Drain GPU pipeline completely while surface is still active.
+     * nouveau defers command buffer execution via its pushbuf pipeline.
+     * Commands referencing the old surface layout must complete before
+     * we destroy it, or eglSwapBuffers on the new surface will deref
+     * stale buffer pointers and crash at 0x0. */
+    glFinish();
+    eglWaitGL();
+
+    /* 2. Sever context attachment completely to force Mesa DRI2 cache drops */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
-    /* 2. Destroy EGL surface wrapper */
+    /* 3. Destroy old EGL surface wrapper */
     if (s_egl_surface != EGL_NO_SURFACE) {
         eglDestroySurface(s_egl_display, s_egl_surface);
         s_egl_surface = EGL_NO_SURFACE;
     }
 
-    /* 3. Force synchronous release of backing GPU buffer slots */
+    /* 4. Release compositor buffer slots and reset NWindow dimensions.
+     * nwindowReleaseBuffers frees the IGraphicBufferProducer slots
+     * synchronously, releasing nvmap GPU memory pages back to the system. */
     nwindowReleaseBuffers(s_nwindow);
-
-    /* 4. Set new NWindow dimensions */
     nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
 
-    /* 5. Create new surface */
+    /* 5. Create new surface at new dimensions */
     s_egl_surface = eglCreateWindowSurface(s_egl_display, s_egl_config,
                                            (EGLNativeWindowType)s_nwindow, NULL);
     if (s_egl_surface == EGL_NO_SURFACE) {
@@ -221,6 +223,18 @@ static bool egl_resize_surface(vec2i_t new_size) {
         TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
         return false;
     }
+
+    /* 7. Force GL state refresh — Mesa caches viewport/scissor/FBO state
+     * internally and may retain stale slot indices from the old resolution */
+    glViewport(0, 0, new_size.x, new_size.y);
+    glScissor(0, 0, new_size.x, new_size.y);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    /* 8. Clear new surface and swap once to finalize physical buffer
+     * attachments before the render loop resumes */
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    eglSwapBuffers(s_egl_display, s_egl_surface);
 
     TRACE("egl_resize_surface: OK %dx%d", new_size.x, new_size.y);
     return true;
