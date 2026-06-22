@@ -196,7 +196,15 @@ static bool egl_resize_surface(vec2i_t new_size) {
      *       return AlreadyInitialized;
      * Only nwindowReleaseBuffers -> _nwindowDisconnect resets slots_configured. */
 
-    /* 1. Detach surface from context */
+    /* 1. Flush all pending GPU work while old surface is still current.
+     * glFinish() forces the GPU to complete all pending operations on the
+     * current surface before we detach it. This allows mesa to fully clean
+     * up internal surface state and free nvmap handles when eglDestroySurface
+     * is called. Must be called BEFORE eglMakeCurrent(NO_SURFACE) — once
+     * detached, glFinish has no surface context to flush against. */
+    glFinish();
+
+    /* 2. Detach surface from context */
     eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
     /* 2. Release NWindow buffer slots BEFORE EGL destroys the surface.
