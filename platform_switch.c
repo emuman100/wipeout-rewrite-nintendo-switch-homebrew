@@ -726,21 +726,24 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 /* ---- Input pump (called each frame by the main loop) ---- */
 
 void platform_pump_events(void) {
-    /* Process applet messages.
-     * AppletMessage_OperationModeChanged triggers libnx to update its cached
-     * g_appletOperationMode value (retained for appletMainLoop exit detection).
-     * The hook calls appletGetOperationMode() at that exact moment when the
-     * cache is fresh and correct. We handle dock/undock in the hook, not here.
-     * appletMainLoop() processes messages and fires hooks. */
+    /* Process applet messages and check for exit. */
     if (!appletMainLoop()) {
         s_wants_exit = true;
     }
 
-    /* Also drain messages explicitly for ExitRequest */
     AppletMessage msg;
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
         if (msg == AppletMessage_ExitRequest)
             s_wants_exit = true;
+        if (msg == AppletMessage_OperationModeChanged) {
+            /* Log the transition but do not act on it.
+             * Resolution is fixed at launch — dock/undock has no effect.
+             * This gives log visibility without changing any state. */
+            AppletOperationMode cur = appletGetOperationMode();
+            TRACE("dock/undock: mode changed to %s — ignored (fixed %dx%d at launch)",
+                  cur == AppletOperationMode_Console ? "docked" : "handheld",
+                  s_screen_size.x, s_screen_size.y);
+        }
     }
 
     /* Feed the input system */
