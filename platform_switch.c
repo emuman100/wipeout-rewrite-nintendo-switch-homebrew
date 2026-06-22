@@ -110,133 +110,19 @@ u32 __nx_applet_type = AppletType_SystemApplication;
 static EGLDisplay s_egl_display = EGL_NO_DISPLAY;
 static EGLContext s_egl_context = EGL_NO_CONTEXT;
 static EGLSurface s_egl_surface = EGL_NO_SURFACE;
-static EGLConfig  s_egl_config  = NULL;
-
 static NWindow *s_nwindow = NULL;
 
 static bool s_wants_exit = false;
 
-/* Screen dimensions — docked mode uses 1920×1080, handheld uses 1280×720. */
-#define SWITCH_W_HANDHELD 1280
-#define SWITCH_H_HANDHELD  720
-#define SWITCH_W_DOCKED   1920
-#define SWITCH_H_DOCKED   1080
-
-/* Last known applet operation mode — compared in hook to detect dock/undock.
- * appletGetOperationMode() returns the correct NEW mode when called from
- * the appletHook callback, because libnx updates its cache before firing hooks.
- * SDL2-switch uses appletGetOperationMode() polling; we use the hook which
- * fires at the same point (inside appletMainLoop) but avoids the double-fire
- * problem by comparing against stored mode and only acting on real changes. */
-static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
-
-/* Applet hook cookie */
-static AppletHookCookie s_applet_hook_cookie;
-
-/* Applet hook callback — fires from within appletMainLoop() after libnx has
- * updated g_appletOperationMode. appletGetOperationMode() returns the correct
- * new mode here. We compare against s_op_mode to debounce double-fires. */
-static vec2i_t screen_size_for_mode(AppletOperationMode mode) {
-    if (mode == AppletOperationMode_Console)
-        return (vec2i_t){ SWITCH_W_DOCKED, SWITCH_H_DOCKED };
-    return (vec2i_t){ SWITCH_W_HANDHELD, SWITCH_H_HANDHELD };
-}
-
-/* Two-stage dock/undock flags matching SDL2 timing:
- * Stage 1 — s_pending_surface: set by hook, consumed by platform_end_frame
- *            AFTER eglSwapBuffers. GPU is idle at that point so eglDestroySurface
- *            can fully release memory before eglCreateWindowSurface.
- * Stage 2 — s_pending_resize: set by platform_end_frame after successful surface
- *            recreation, consumed by platform_prepare_frame at start of next frame. */
-static AppletOperationMode s_pending_surface = (AppletOperationMode)-1;
-static vec2i_t             s_pending_resize  = { 0, 0 };
-
-/* Forward declaration */
-static bool egl_resize_surface(vec2i_t new_size);
-
-/* Applet hook callback — fires from within appletMainLoop() after libnx has
- * updated g_appletOperationMode. Only records the pending mode change.
- * Surface recreation is deferred to platform_end_frame after eglSwapBuffers
- * so the GPU is idle when eglDestroySurface is called. */
-static void s_applet_hook_cb(AppletHookType hook, void *param) {
-    (void)param;
-    if (hook == AppletHookType_OnOperationMode) {
-        AppletOperationMode mode = appletGetOperationMode();
-        if (mode != s_op_mode) {
-            s_op_mode = mode;
-            s_pending_surface = mode;
-            vec2i_t new_size = screen_size_for_mode(mode);
-            TRACE("dock/undock: mode=%d size=%dx%d — queued for end of frame",
-                  (int)mode, new_size.x, new_size.y);
-        }
-    }
-}
-
-/* Recreate the EGL surface at the new NWindow dimensions.
- * SDL2-switch does exactly this in SWITCH_SetWindowSize():
- *   eglMakeCurrent(NO_SURFACE) → eglDestroySurface → nwindowSetDimensions
- *   → eglCreateWindowSurface → eglMakeCurrent
- * nwindowSetDimensions cannot be called while buffers are registered,
- * so the surface must be destroyed first to release them. */
-static bool egl_resize_surface(vec2i_t new_size) {
-    /* Correct sequence per libnx native_window.c source analysis:
-     *
-     * nwindowReleaseBuffers MUST be called BEFORE eglDestroySurface.
-     * It calls _nwindowDisconnect -> bqDisconnect while the binder session
-     * is still live (is_connected=true). This:
-     *   1. Frees GPU buffer slot allocations synchronously via IPC
-     *   2. Sets slots_configured=0, which nwindowSetDimensions requires
-     *
-     * If called AFTER eglDestroySurface, EGL has already called bqDisconnect
-     * internally, leaving the binder session torn down. nwindowReleaseBuffers
-     * then tries to call through an invalidated function pointer -> NULL crash.
-     *
-     * nwindowSetDimensions requires slots_configured==0:
-     *   if ((nw->width || nw->height) && nw->slots_configured)
-     *       return AlreadyInitialized;
-     * Only nwindowReleaseBuffers -> _nwindowDisconnect resets slots_configured. */
-
-    /* 1. Flush all pending GPU work while old surface is still current.
-     * glFinish() forces the GPU to complete all pending operations on the
-     * current surface before we detach it. This allows mesa to fully clean
-     * up internal surface state and free nvmap handles when eglDestroySurface
-     * is called. Must be called BEFORE eglMakeCurrent(NO_SURFACE) — once
-     * detached, glFinish has no surface context to flush against. */
-    glFinish();
-
-    /* 2. Detach surface from context */
-    eglMakeCurrent(s_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-
-    /* 2. Release NWindow buffer slots BEFORE EGL destroys the surface.
-     *    Binder session is still live here — bqDisconnect succeeds. */
-    nwindowReleaseBuffers(s_nwindow);
-
-    /* 3. Destroy EGL surface — EGL cleans up after bqDisconnect already ran */
-    if (s_egl_surface != EGL_NO_SURFACE) {
-        eglDestroySurface(s_egl_display, s_egl_surface);
-        s_egl_surface = EGL_NO_SURFACE;
-    }
-
-    /* 4. Set new dimensions — safe now that slots_configured==0 */
-    nwindowSetDimensions(s_nwindow, (u32)new_size.x, (u32)new_size.y);
-
-    /* 5. Create new surface */
-    s_egl_surface = eglCreateWindowSurface(s_egl_display, s_egl_config,
-                                           (EGLNativeWindowType)s_nwindow, NULL);
-    if (s_egl_surface == EGL_NO_SURFACE) {
-        TRACE("egl_resize_surface: eglCreateWindowSurface failed (0x%x)", eglGetError());
-        return false;
-    }
-
-    /* 6. Reattach context to new surface */
-    if (!eglMakeCurrent(s_egl_display, s_egl_surface, s_egl_surface, s_egl_context)) {
-        TRACE("egl_resize_surface: eglMakeCurrent failed (0x%x)", eglGetError());
-        return false;
-    }
-
-    TRACE("egl_resize_surface: OK %dx%d", new_size.x, new_size.y);
-    return true;
-}
+/* Screen dimensions — set once at launch from appletGetOperationMode().
+ * Resolution is fixed for the lifetime of the session:
+ *   - Launch handheld/Lite: 720p, stays 720p if docked (TV upscales to fill screen)
+ *   - Launch docked: 1080p, stays 1080p if undocked (handheld screen downscales)
+ * EGL surface recreation on dock/undock exhausts mesa-switch GPU memory on the
+ * 3rd+ transition regardless of call ordering or timing. Every working Switch port
+ * (RetroArch, mgba, deko3d) either uses nwindowSetCrop or fixes resolution at launch.
+ * We fix at launch. s_screen_size is set in main() before egl_init(). */
+static vec2i_t s_screen_size = { 1280, 720 };
 
 /* Audio */
 static AudioOutBuffer s_audio_buffers[2];
@@ -267,9 +153,9 @@ static bool egl_init(void) {
     }
     TRACE("egl_init: nwindow OK");
 
-    /* Set NWindow dimensions based on current operation mode */
-    vec2i_t initial_size = screen_size_for_mode(s_op_mode);
-    nwindowSetDimensions(s_nwindow, (u32)initial_size.x, (u32)initial_size.y);
+    /* Set NWindow dimensions from s_screen_size — fixed at launch */
+    nwindowSetDimensions(s_nwindow, (u32)s_screen_size.x, (u32)s_screen_size.y);
+    TRACE("egl_init: NWindow %dx%d", s_screen_size.x, s_screen_size.y);
 
     s_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (s_egl_display == EGL_NO_DISPLAY) {
@@ -306,7 +192,6 @@ static bool egl_init(void) {
         TRACE("egl_init: eglChooseConfig failed");
         return false;
     }
-    s_egl_config = config;
     TRACE("egl_init: eglChooseConfig OK");
 
     s_egl_surface = eglCreateWindowSurface(s_egl_display, config,
@@ -643,7 +528,7 @@ void platform_exit(void) {
 }
 
 vec2i_t platform_screen_size(void) {
-    return screen_size_for_mode(s_op_mode);
+    return s_screen_size;
 }
 
 double platform_now(void) {
@@ -682,13 +567,6 @@ void platform_prepare_frame(void) {
      * application's event loop at the start of the frame (after surface recreate,
      * before render, before eglSwapBuffers). The cooldown ensures we wait for
      * enough swaps after the surface recreate before mesa is ready for FBO ops. */
-    if (s_pending_resize.x > 0 && s_pending_resize.y > 0) {
-        vec2i_t sz = s_pending_resize;
-        s_pending_resize = (vec2i_t){ 0, 0 };
-        system_resize(sz);
-        TRACE("dock/undock: system_resize %dx%d applied", sz.x, sz.y);
-    }
-
     static int prep_count = 0;
     if (prep_count < 3) {
         /* Query whatever FBO is currently bound (set by render_frame_prepare) */
@@ -722,21 +600,7 @@ void platform_end_frame(void) {
         eglSwapBuffers(s_egl_display, s_egl_surface);
     }
 
-    /* After eglSwapBuffers the GPU is idle — safe to recreate EGL surface.
-     * This matches SDL2 timing: SWITCH_PumpEvents fires after previous swap
-     * completed, so eglDestroySurface has a clean GPU state to release memory. */
-    if (s_pending_surface != (AppletOperationMode)-1) {
-        vec2i_t new_size = screen_size_for_mode(s_pending_surface);
-        TRACE("dock/undock: mode=%d size=%dx%d — recreating EGL surface (post-swap)",
-              (int)s_pending_surface, new_size.x, new_size.y);
-        if (egl_resize_surface(new_size)) {
-            s_pending_resize = new_size;
-        } else {
-            TRACE("dock/undock: egl_resize_surface FAILED");
-        }
-        s_pending_surface = (AppletOperationMode)-1;
-    }
-
+    /* Decrement resize cooldown */
     /* Push audio for this frame */
     audio_update();
 }
@@ -864,7 +728,7 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 void platform_pump_events(void) {
     /* Process applet messages.
      * AppletMessage_OperationModeChanged triggers libnx to update its cached
-     * g_appletOperationMode value, then fires our registered appletHook.
+     * g_appletOperationMode value (retained for appletMainLoop exit detection).
      * The hook calls appletGetOperationMode() at that exact moment when the
      * cache is fresh and correct. We handle dock/undock in the hook, not here.
      * appletMainLoop() processes messages and fires hooks. */
@@ -906,23 +770,24 @@ int main(int argc, char *argv[]) {
     log_open();
     TRACE("wipegame starting");
 
-    /* Sample initial operation mode for correct NWindow dimensions at launch.
-     * SDL2-switch does the same: operationMode = appletGetOperationMode()
-     * in SWITCH_CreateWindow() before setting NWindow dimensions. */
-    /* Initialise the Power State Manager service.
-     * SDL2-switch calls psmInitialize() in SWITCH_VideoInit() before
-     * querying appletGetOperationMode(). Without it, appletGetOperationMode()
-     * cannot read dock state and always returns Handheld. */
+    /* Query dock state once at launch to set fixed render resolution.
+     * psmInitialize() is required for appletGetOperationMode() to return
+     * the correct state. Resolution is fixed for the session lifetime:
+     *   - Launch handheld/Lite: 720p — stays 720p when docked (TV upscales)
+     *   - Launch docked: 1080p — stays 1080p when undocked (screen downscales)
+     * Dock/undock resolution changes are not supported due to a mesa-switch
+     * GPU memory limitation that causes crashes on the 3rd+ EGL surface
+     * recreation regardless of call ordering or timing. */
     psmInitialize();
-
-    s_op_mode = appletGetOperationMode();
-    TRACE("initial op_mode=%d (%s)", (int)s_op_mode,
-          s_op_mode == AppletOperationMode_Console ? "docked 1080p" : "handheld 720p");
-
-    /* Register hook for dock/undock detection.
-     * Fires from within appletMainLoop() after libnx updates its mode cache.
-     * appletGetOperationMode() returns the correct new mode at that point. */
-    appletHook(&s_applet_hook_cookie, s_applet_hook_cb, NULL);
+    AppletOperationMode launch_mode = appletGetOperationMode();
+    psmExit();
+    if (launch_mode == AppletOperationMode_Console) {
+        s_screen_size = (vec2i_t){ 1920, 1080 };
+        TRACE("launch mode: docked — render at 1080p (fixed for session)");
+    } else {
+        s_screen_size = (vec2i_t){ 1280, 720 };
+        TRACE("launch mode: handheld — render at 720p (fixed for session)");
+    }
 
     /* ---- EGL + GLES2 ---- */
     TRACE("egl_init: starting");
@@ -974,8 +839,6 @@ int main(int argc, char *argv[]) {
     system_cleanup();
     platform_video_cleanup();
     audio_cleanup();
-    appletUnhook(&s_applet_hook_cookie);
-    psmExit();
     TRACE("cleanup: done");
     log_close();
 
