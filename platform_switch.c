@@ -725,6 +725,11 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 
 /* ---- Input pump (called each frame by the main loop) ---- */
 
+/* Last known operation mode — used for dock/undock logging only.
+ * Resolution is fixed at launch and never changes. This purely provides
+ * log visibility to verify correct operation during dock transitions. */
+static AppletOperationMode s_last_logged_mode = (AppletOperationMode)-1;
+
 void platform_pump_events(void) {
     /* Process applet messages and check for exit. */
     if (!appletMainLoop()) {
@@ -735,15 +740,19 @@ void platform_pump_events(void) {
     while (R_SUCCEEDED(appletGetMessage(&msg))) {
         if (msg == AppletMessage_ExitRequest)
             s_wants_exit = true;
-        if (msg == AppletMessage_OperationModeChanged) {
-            /* Log the transition but do not act on it.
-             * Resolution is fixed at launch — dock/undock has no effect.
-             * This gives log visibility without changing any state. */
-            AppletOperationMode cur = appletGetOperationMode();
+    }
+
+    /* Poll dock state via psmInitialize-backed appletGetOperationMode().
+     * This is the same reliable mechanism SDL2-switch uses. Log transitions
+     * for verification but do not act on them — resolution is fixed at launch. */
+    AppletOperationMode cur_mode = appletGetOperationMode();
+    if (cur_mode != s_last_logged_mode) {
+        if (s_last_logged_mode != (AppletOperationMode)-1) {
             TRACE("dock/undock: mode changed to %s — ignored (fixed %dx%d at launch)",
-                  cur == AppletOperationMode_Console ? "docked" : "handheld",
+                  cur_mode == AppletOperationMode_Console ? "docked" : "handheld",
                   s_screen_size.x, s_screen_size.y);
         }
+        s_last_logged_mode = cur_mode;
     }
 
     /* Feed the input system */
@@ -783,7 +792,6 @@ int main(int argc, char *argv[]) {
      * recreation regardless of call ordering or timing. */
     psmInitialize();
     AppletOperationMode launch_mode = appletGetOperationMode();
-    psmExit();
     if (launch_mode == AppletOperationMode_Console) {
         s_screen_size = (vec2i_t){ 1920, 1080 };
         TRACE("launch mode: docked — render at 1080p (fixed for session)");
@@ -842,6 +850,7 @@ int main(int argc, char *argv[]) {
     system_cleanup();
     platform_video_cleanup();
     audio_cleanup();
+    psmExit();
     TRACE("cleanup: done");
     log_close();
 
