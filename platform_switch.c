@@ -562,11 +562,6 @@ void platform_video_cleanup(void) {
 }
 
 void platform_prepare_frame(void) {
-    /* Apply deferred system_resize at the start of the frame, before rendering.
-     * This matches SDL2-switch behaviour: NativeResized() is called from the
-     * application's event loop at the start of the frame (after surface recreate,
-     * before render, before eglSwapBuffers). The cooldown ensures we wait for
-     * enough swaps after the surface recreate before mesa is ready for FBO ops. */
     static int prep_count = 0;
     if (prep_count < 3) {
         /* Query whatever FBO is currently bound (set by render_frame_prepare) */
@@ -600,7 +595,6 @@ void platform_end_frame(void) {
         eglSwapBuffers(s_egl_display, s_egl_surface);
     }
 
-    /* Decrement resize cooldown */
     /* Push audio for this frame */
     audio_update();
 }
@@ -725,28 +719,11 @@ uint32_t platform_store_userdata(const char *name, void *data, int32_t size) {
 
 /* ---- Input pump (called each frame by the main loop) ---- */
 
-/* Last known operation mode — used for dock/undock logging only.
- * Resolution is fixed at launch and never changes. This purely provides
- * log visibility to verify correct operation during dock transitions. */
-static AppletOperationMode s_last_logged_mode = (AppletOperationMode)-1;
-
 void platform_pump_events(void) {
-    /* Process applet messages and check for exit. */
+    /* Check if the user requested exit via appletMainLoop */
     if (!appletMainLoop()) {
         s_wants_exit = true;
-    }
-
-    /* Poll dock state via psmInitialize-backed appletGetOperationMode().
-     * This is the same reliable mechanism SDL2-switch uses. Log transitions
-     * for verification but do not act on them — resolution is fixed at launch. */
-    AppletOperationMode cur_mode = appletGetOperationMode();
-    if (cur_mode != s_last_logged_mode) {
-        if (s_last_logged_mode != (AppletOperationMode)-1) {
-            TRACE("dock/undock: mode changed to %s — ignored (fixed %dx%d at launch)",
-                  cur_mode == AppletOperationMode_Console ? "docked" : "handheld",
-                  s_screen_size.x, s_screen_size.y);
-        }
-        s_last_logged_mode = cur_mode;
+        return;
     }
 
     /* Feed the input system */
