@@ -736,12 +736,6 @@ void platform_pump_events(void) {
         s_wants_exit = true;
     }
 
-    AppletMessage msg;
-    while (R_SUCCEEDED(appletGetMessage(&msg))) {
-        if (msg == AppletMessage_ExitRequest)
-            s_wants_exit = true;
-    }
-
     /* Poll dock state via psmInitialize-backed appletGetOperationMode().
      * This is the same reliable mechanism SDL2-switch uses. Log transitions
      * for verification but do not act on them — resolution is fixed at launch. */
