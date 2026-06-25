@@ -187,7 +187,6 @@ with the original WipEout logo icon — and press **A** to launch it.
 | **L** | Left airbrake |
 | **R** | Right airbrake |
 | **D-Pad** | Steer / pitch nose up-down |
-| **Left stick** | Navigate menus only (see note below) |
 | **+** (Plus) | Pause |
 
 ### Menus
@@ -218,8 +217,7 @@ Save files and configuration are stored at:
 sdmc:/switch/wipegame/userdata/
 ```
 
-This directory is created automatically on first launch. It requires no title
-ID, no save-data partition, and no special permissions. High scores and race
+This directory is created automatically on first launch. High scores and race
 progress persist here across sessions.
 
 ---
@@ -243,7 +241,7 @@ progress persist here across sessions.
 │  │  Graphics   │  │    Audio     │  │      Input        │  │
 │  │  EGL+GLES2  │  │ audout/libnx │  │  padXxx / libnx   │  │
 │  │ mesa-switch │  │ 48 kHz s16le │  │ Joy-Con, handheld │  │
-│  │ 720p / 1080p│  │  2 DMA bufs  │  │  Pro Controller   │  │
+│  │720p or 1080p│  │  2 DMA bufs  │  │  Pro Controller   │  │
 │  └─────────────┘  └──────────────┘  └───────────────────┘  │
 │                                                              │
 │  ┌─────────────────────────────────────────────────────┐    │
@@ -270,19 +268,19 @@ for strict GLES2 compliance. libGLESv2 is linked statically; GL functions
 are called directly rather than through `eglGetProcAddress` dispatch stubs,
 which crash on Switch mesa due to lazy shader compiler initialisation.
 
-**Framebuffer:** The NWindow dimensions are set dynamically based on the
-current operation mode: **1280×720** in handheld mode and **1920×1080**
-when docked. `appletGetOperationMode()` is polled each frame via
-`platform_pump_events()`; on a mode change `nwindowSetDimensions()` and
-`system_resize()` are called immediately so the render resolution and
-projection matrices update without restarting the game. The Switch
-hardware compositor handles the final output to the TV.
+**Framebuffer:** The render resolution is fixed at launch based on dock
+state at startup. If launched in **handheld mode**, the NWindow is set to
+**1280×720** for the session. If launched **docked**, it is set to
+**1920×1080**. The render resolution does not change mid-session — the TV
+upscales a handheld-launched session and the handheld screen downscales a
+docked-launched session. The Switch hardware compositor handles the
+final output in both cases.
 
 **Render pipeline:** The game renders to an offscreen FBO (render-to-texture),
-then blits it to the EGL surface via a fullscreen quad. This supports
-the three built-in render resolutions (240p, 480p, native) and both
-post-effect modes (none, CRT scanline), all selectable in-game. Native
-resolution is 1280×720 in handheld mode and 1920×1080 when docked.
+then blits it to the EGL surface via a fullscreen quad. This supports the three built-in render resolutions (240p, 480p, native)
+and both post-effect modes (none, CRT scanline), all selectable in-game.
+Native resolution is 1280×720 if launched handheld, or 1920×1080 if
+launched docked.
 
 **Texture atlas:** A single 2048×2048 RGBA8 GPU texture holds all game
 textures. The CPU-side packing buffer is allocated from the hunk
@@ -311,10 +309,6 @@ header translates desktop GL assumptions into strict GLES2 requirements:
 - GLEW stubbed out — `glewInit()` and `glewExperimental` are no-ops;
   the Switch SDK has no GLEW equivalent
 
-**Dock/undock transitions:** EGL surfaces and GL contexts survive a
-dock/undock event transparently via mesa-switch. The game loop continues
-uninterrupted across mode changes.
-
 ---
 
 ### Audio
@@ -339,9 +333,6 @@ to decode a 4 KB QOA frame (~5 120 samples). At worst-case SD card
 speeds this takes under 0.5 ms — negligible against the 33 ms frame
 budget. If a music file is absent the game runs silently; if it ends,
 the game advances to the next track or loops.
-
-**Dock/undock transitions:** Audio output is independent of the display
-subsystem and continues uninterrupted across mode changes.
 
 ---
 
@@ -423,10 +414,31 @@ freed before gameplay begins.
 
 ---
 
+### Debugging
+
+At startup, `psmInitialize()` (Power State Manager service) is called
+before the first `appletGetOperationMode()` query — without it,
+`appletGetOperationMode()` always returns Handheld regardless of actual
+dock state. Each frame, `appletMainLoop()` processes any pending PSM
+messages from dock/undock events, after which `appletGetOperationMode()`
+is polled to read the updated state. When a transition is detected, it
+is logged to `debug.log` with the current mode and render resolution.
+The render resolution does not change on transition — this is a
+diagnostic feature only. See Known Limitations.
+
+All debug output is written to:
+
+```
+sdmc:/switch/wipegame/debug.log
+```
+
+---
+
 ## Known Limitations and Future Work
 
 | Item | Notes |
 |---|---|
+| **Resolution fixed at launch** | Render resolution is set from dock state at startup: 720p if launched handheld, 1080p if launched docked. It does not change when docking or undocking mid-session. To get the correct resolution for your display, launch the game in the mode you intend to play in. Dynamic mid-session resolution switching is not supported due to a mesa-switch GPU memory limitation that causes crashes on repeated EGL surface recreation. |
 | **Analog stick steering** | Left stick does not steer in-game by default — requires manual remapping via Options → Controls. A future fix would set default bindings for the Switch. |
 | **Rumble** | libnx exposes `hidSendVibrationValue()`; mapping it to ship collision events in `ship.c` would improve feel. |
 
@@ -440,11 +452,11 @@ freed before gameplay begins.
 | **Original WipEout** | Psygnosis / Sony Interactive Entertainment (1995) |
 | **Nintendo Switch port** | Claude (Anthropic) — AI-developed under the direction of **emuman100** |
 | **Port direction & oversight** | emuman100 |
-| **Dreamcast port reference** | [jnmartin84](https://github.com/jnmartin84) — [wipeout-dc](https://github.com/jnmartin84/wipeout-dc) |
-| **PS Vita port reference** | [Rinnegatamante](https://github.com/Rinnegatamante) — wipeout-rewrite vita port |
 | **Renderer reference** | [m4xw (ppsspp)](https://github.com/m4xw/ppsspp) Switch port — direct source of the static libGLESv2 linking requirement and GL error drain approach that fixed the renderer. [fgsfdsfgs (gzdoom)](https://github.com/fgsfdsfgs/gzdoom) Switch port — used as a corroborating cross-reference for GLES2 context setup and applet handling |
+| **Dock/undock detection reference** | [devkitPro SDL2-switch](https://github.com/devkitPro/SDL) (`switch-sdl-2.28` branch) — definitive reference for `psmInitialize()` requirement, per-frame `appletGetOperationMode()` polling pattern, and EGL surface resize sequence (`SWITCH_PumpEvents`, `SWITCH_VideoInit`, `SWITCH_SetWindowSize`) |
+| **mgba / RetroArch Switch ports** | [Epicpkmn11 (mgba)](https://github.com/mgba-emu/mgba) and [libretro (RetroArch)](https://github.com/libretro/RetroArch) — reference for `nwindowSetCrop`-based dock/undock approach; confirmed that repeated raw EGL surface recreation is not used by any working Switch port |
 | **Atmosphère** | [Sciresm and the Atmosphère team](https://github.com/Atmosphere-NX/Atmosphere) — custom firmware that makes Switch homebrew possible |
-| **devkitPro** | [devkitPro team](https://devkitpro.org) — toolchain, libnx, and documentation without which this port could not exist |
+| **devkitPro** | [devkitPro team](https://devkitpro.org) — toolchain, libnx, and documentation without which this port could not exist. [switchbrew/libnx](https://github.com/switchbrew/libnx) `native_window.c` source was analysed to determine correct `nwindowReleaseBuffers` ordering during the dock/undock investigation |
 
 ---
 

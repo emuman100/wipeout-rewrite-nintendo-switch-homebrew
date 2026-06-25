@@ -437,8 +437,8 @@ static void audio_update(void) {
  *
  * Maps libnx HidNpadButton values to wipeout-rewrite INPUT_* constants.
  * s_pad is initialised once in main() via padInitializeDefault().
- * input_clear() resets per-frame edge states (pressed/released) before
- * re-polling, matching the pattern used by platform_sdl.c.
+ * input_clear() resets per-frame edge states (pressed/released) after
+ * game_update(), called by system_update() — not here.
  * ---------------------------------------------------------------------- */
 
 static void input_update(void) {
@@ -611,7 +611,7 @@ void platform_end_frame(void) {
  * homebrew via libnx without any extra mounting.
  *
  * Assets (read-only):  sdmc:/wipeout/<name>
- *   Copy the 517 game data files from the PSX disc into this directory.
+ *   Copy the 521 game data files from the PSX disc into this directory.
  *
  * User data (read/write):  sdmc:/switch/wipegame/userdata/<name>
  *   Saves and config.  The directory is created automatically on first launch.
