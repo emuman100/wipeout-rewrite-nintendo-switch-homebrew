@@ -124,6 +124,11 @@ static bool s_wants_exit = false;
  * We fix at launch. s_screen_size is set in main() before egl_init(). */
 static vec2i_t s_screen_size = { 1280, 720 };
 
+/* Last known operation mode — tracked per-frame to log dock/undock transitions.
+ * Detection only: no EGL surface recreation or system_resize on transition.
+ * Initialised to Handheld; overwritten in main() from appletGetOperationMode(). */
+static AppletOperationMode s_op_mode = AppletOperationMode_Handheld;
+
 /* Audio */
 static AudioOutBuffer s_audio_buffers[2];
 static u8 *s_audio_data[2];
@@ -726,6 +731,23 @@ void platform_pump_events(void) {
         return;
     }
 
+    /* Detect dock/undock transitions via per-frame appletGetOperationMode() poll.
+     * psmInitialize() (called in main() before egl_init()) is required for this
+     * to return correct state — without it, always returns Handheld regardless
+     * of actual dock state. Matches SDL2-switch SWITCH_PumpEvents exactly.
+     *
+     * Detection only: resolution is fixed at launch. No EGL surface recreation,
+     * no system_resize. Transition logged for verification. */
+    AppletOperationMode current_mode = appletGetOperationMode();
+    if (current_mode != s_op_mode) {
+        s_op_mode = current_mode;
+        TRACE("dock/undock: mode=%d (%s) — render resolution fixed at %dx%d (launched %s)",
+            (int)current_mode,
+            current_mode == AppletOperationMode_Console ? "docked" : "handheld",
+            s_screen_size.x, s_screen_size.y,
+            s_screen_size.x == 1920 ? "docked" : "handheld");
+    }
+
     /* Feed the input system */
     input_update();
 }
@@ -763,6 +785,7 @@ int main(int argc, char *argv[]) {
      * recreation regardless of call ordering or timing. */
     psmInitialize();
     AppletOperationMode launch_mode = appletGetOperationMode();
+    s_op_mode = launch_mode;
     if (launch_mode == AppletOperationMode_Console) {
         s_screen_size = (vec2i_t){ 1920, 1080 };
         TRACE("launch mode: docked — render at 1080p (fixed for session)");
