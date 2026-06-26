@@ -4,7 +4,7 @@ A Nintendo Switch NRO port of [phoboslab/wipeout-rewrite](https://github.com/pho
 
 > **You need a legally obtained copy of the original PlayStation WipEout disc** to supply the game data. The port itself contains no game content.
 
-> **This port is functional but largely untested.** It has been developed and verified on a single Switch unit running Atmosphère. Compatibility across different firmware versions, hardware revisions, and CFW configurations has not been broadly tested. If you try it, feedback is welcome — bug reports and test results from different setups are especially useful at this stage.
+> **This port is functional but largely untested.** It has been developed and verified on a Nintendo Switch Lite and a Nintendo Switch running Atmosphère. Compatibility across different firmware versions, hardware revisions, and CFW configurations has not been broadly tested. If you try it, feedback is welcome — bug reports and test results from different setups are especially useful at this stage.
 
 > **Developed against upstream commit `bf7c825`** (`Merge pull request #183 from unofficial-fish/trig-removal`). Testing was done using this revision of wipeout-rewrite.
 
